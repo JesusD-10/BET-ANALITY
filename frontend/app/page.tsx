@@ -9,7 +9,7 @@ type Match = { id: string; competition: string; kickoff_at: string; home_team: s
 type Market = { market_key: string; label: string; selection: string; probability: number; fair_odds: number; best_odds: number | null; bookmaker: string | null; expected_value: number | null; confidence: string; data_quality: number; factors_for: string[]; risks: string[] };
 type Analysis = { match: Match; model_version: string; markets: Market[]; notes: string[] };
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "https://bet-anality.onrender.com/api/v1";
 const percent = (value: number) => `${Math.round(value * 100)}%`;
 const formatTime = (value: string) => new Intl.DateTimeFormat("es-PE", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 const formatDate = (value: Date) => new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "2-digit", month: "short", year: "numeric" }).format(value);
@@ -34,12 +34,15 @@ export default function Home() {
         setMatches(data.matches);
         if (!analysis && data.matches[0]) await loadAnalysis(data.matches[0].id);
         setError("");
-      } catch { setError("API no disponible. Inicia FastAPI en el puerto 8000 para ver datos en vivo."); }
+      } catch (error) {
+        console.error("ERROR API:", error);
+        setError(`Error API: ${error}`);
+      }
       finally { setLoading(false); }
     }, 250);
     return () => window.clearTimeout(timer);
-  // The selected analysis intentionally stays stable while a search is typed.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The selected analysis intentionally stays stable while a search is typed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
 
   async function loadAnalysis(id: string) {
