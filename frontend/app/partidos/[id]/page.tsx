@@ -82,7 +82,10 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
           {match.competition} · {new Date(match.kickoff_at).toLocaleString("es-PE", { dateStyle: "full", timeStyle: "short" })}
         </p>
         <h1>
-          {match.home_team} <span>vs</span> {match.away_team}
+          {match.home_logo && <img src={match.home_logo} alt={match.home_team} className="header-team-logo" />}
+          {match.home_team} <span>vs</span>{" "}
+          {match.away_logo && <img src={match.away_logo} alt={match.away_team} className="header-team-logo" />}
+          {match.away_team}
         </h1>
         <div className="detail-meta">
           <span>{match.status}</span>

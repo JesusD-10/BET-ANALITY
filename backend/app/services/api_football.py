@@ -70,6 +70,8 @@ class APIFootballProvider:
             away_team = teams.get("away", {}).get("name", "Visitante")
             home_team_id = str(teams.get("home", {}).get("id")) if teams.get("home", {}).get("id") else None
             away_team_id = str(teams.get("away", {}).get("id")) if teams.get("away", {}).get("id") else None
+            home_logo = teams.get("home", {}).get("logo")
+            away_logo = teams.get("away", {}).get("logo")
 
             status_short = fixture.get("status", {}).get("short", "NS")
             status_desc = self._normalize_status(status_short)
@@ -87,6 +89,8 @@ class APIFootballProvider:
                     away_team=away_team,
                     home_team_id=home_team_id,
                     away_team_id=away_team_id,
+                    home_logo=home_logo,
+                    away_logo=away_logo,
                     venue=venue_name,
                     referee=referee,
                     data_quality=0.95,

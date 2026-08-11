@@ -21,9 +21,9 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = ""
 
-    openai_model: str = "gpt-5-mini"
+    openai_model: str = "gpt-4o-mini"
 
-    openai_timeout_seconds: int = 5
+    openai_timeout_seconds: int = 15
 
     openai_max_retries: int = 2
 
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     api_football_is_rapidapi: bool = False
 
-    api_football_timeout_seconds: int = 3
+    api_football_timeout_seconds: int = 10
 
 
     # Football Data API

@@ -62,6 +62,8 @@ class MatchSummary(BaseModel):
     referee: str | None = None
     home_form: str | None = None  # ej: "W-W-D-L-W"
     away_form: str | None = None  # ej: "L-W-W-D-W"
+    home_logo: str | None = None
+    away_logo: str | None = None
     data_quality: float = Field(default=0.9, ge=0, le=1)
     odds_available: bool = False
     status: str

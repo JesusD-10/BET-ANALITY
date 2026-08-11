@@ -55,6 +55,8 @@ export type Match = {
   away_team: string;
   home_team_id?: string | null;
   away_team_id?: string | null;
+  home_logo?: string | null;
+  away_logo?: string | null;
   venue?: string | null;
   referee?: string | null;
   home_form?: string | null;
