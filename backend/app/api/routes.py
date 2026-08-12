@@ -6,11 +6,12 @@ from app.schemas.health import HealthResponse
 from app.schemas.matches import AssistantQuestion, AssistantResponse, MatchAnalysisResponse, MatchListResponse, RecommendationResponse
 from app.core.config import settings
 from app.services.matches import (
+    MatchProviderUnavailable,
     get_analysis,
     get_dream_recommendations,
-    get_highlights,
+    get_highlights_result,
     get_recommendations,
-    search_matches,
+    search_matches_result,
 )
 
 router = APIRouter()
@@ -21,42 +22,37 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok", service="bet-analizador-api")
 
 
-def _active_source() -> str:
-    provider = settings.sports_data_provider.casefold()
-    if provider in {"api-football", "apifootball"} and settings.api_football_key:
-        return "api-football"
-    if provider == "football-data" and settings.football_data_api_token:
-        return "football-data"
-    return "mock"
-
-
-
 @router.get("/matches/highlights", response_model=MatchListResponse, tags=["matches"])
 def highlights(match_date: date | None = Query(default=None)) -> MatchListResponse:
-    selected_date = match_date or date.today()
-    source = _active_source()
+    result = get_highlights_result(match_date)
     return MatchListResponse(
-        date=selected_date,
-        matches=get_highlights(selected_date),
-        source=source,
-        notice=None if source != "mock" else "Proveedor externo no configurado; se muestran fixtures demostrativos.",
+        date=result.date,
+        matches=result.matches,
+        source=result.source,
+        notice=result.notice,
     )
 
 
 @router.get("/matches/search", response_model=MatchListResponse, tags=["matches"])
 def search(q: str | None = Query(default=None, max_length=120)) -> MatchListResponse:
-    source = _active_source()
+    result = search_matches_result(q)
     return MatchListResponse(
-        date=date.today(),
-        matches=search_matches(q),
-        source=source,
-        notice=None if source != "mock" else "Proveedor externo no configurado; la búsqueda usa el catálogo mock.",
+        date=result.date,
+        matches=result.matches,
+        source=result.source,
+        notice=result.notice,
     )
 
 
 @router.get("/matches/{match_id}/analysis", response_model=MatchAnalysisResponse, tags=["analysis"])
 def analysis(match_id: str) -> MatchAnalysisResponse:
-    result = get_analysis(match_id)
+    try:
+        result = get_analysis(match_id)
+    except MatchProviderUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="El proveedor del partido está tardando. Intenta nuevamente en unos segundos.",
+        ) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="El partido solicitado no existe")
     return result

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   CircleAlert,
@@ -18,7 +18,15 @@ import {
 import AppShell, { ResponsibleNote } from "../../components/AppShell";
 import CombinationCard from "../../components/CombinationCard";
 import MatchHero from "../../components/MatchHero";
-import { apiFetch, apiUrl, getAnalysis, type Analysis } from "../../lib/api";
+import {
+  ApiError,
+  ApiTimeoutError,
+  apiFetch,
+  apiUrl,
+  getAnalysis,
+  isAbortError,
+  type Analysis,
+} from "../../lib/api";
 
 export default function MatchDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -27,28 +35,83 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
   const [answer, setAnswer] = useState("");
   const [loadingAnswer, setLoadingAnswer] = useState(false);
   const [error, setError] = useState("");
+  const [loadingAnalysis, setLoadingAnalysis] = useState(true);
+  const [retryVersion, setRetryVersion] = useState(0);
+  const assistantControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    getAnalysis(id)
-      .then(setAnalysis)
-      .catch(() => setError("No encontramos este partido en el catálogo actual."));
-  }, [id]);
+    const controller = new AbortController();
+    assistantControllerRef.current?.abort();
+    assistantControllerRef.current = null;
+    setAnalysis(null);
+    setError("");
+    setQuestion("");
+    setAnswer("");
+    setLoadingAnswer(false);
+    setLoadingAnalysis(true);
+
+    getAnalysis(id, controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setAnalysis(result);
+        setError("");
+      })
+      .catch((requestError: unknown) => {
+        if (controller.signal.aborted || isAbortError(requestError)) return;
+
+        if (requestError instanceof ApiError && requestError.status === 404) {
+          setError("Este partido ya no está disponible en el catálogo actual.");
+        } else if (requestError instanceof ApiTimeoutError) {
+          setError("El análisis tardó más de lo esperado. Puedes intentarlo nuevamente.");
+        } else if (requestError instanceof ApiError && requestError.status >= 500) {
+          setError("El servicio de análisis no está disponible temporalmente.");
+        } else if (requestError instanceof ApiError) {
+          setError(requestError.detail);
+        } else {
+          setError("No pudimos conectar con el servicio de análisis.");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingAnalysis(false);
+      });
+
+    return () => {
+      controller.abort();
+      assistantControllerRef.current?.abort();
+    };
+  }, [id, retryVersion]);
 
   async function ask() {
     if (!question.trim()) return;
+    assistantControllerRef.current?.abort();
+    const controller = new AbortController();
+    assistantControllerRef.current = controller;
     setLoadingAnswer(true);
+    setAnswer("");
     try {
       const response = await apiFetch(`${apiUrl}/assistant/question`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question, match_id: id }),
+        signal: controller.signal,
       });
+      if (!response.ok) throw new ApiError(response.status, "No se pudo consultar al asistente.");
       const data = await response.json();
       setAnswer(data.summary);
-    } catch {
-      setAnswer("Ocurrió un inconveniente al consultar con el asistente IA.");
+    } catch (requestError: unknown) {
+      if (controller.signal.aborted || isAbortError(requestError)) return;
+      if (requestError instanceof ApiTimeoutError) {
+        setAnswer("El asistente tardó demasiado en responder. Intenta nuevamente.");
+      } else if (requestError instanceof ApiError && requestError.status >= 500) {
+        setAnswer("El asistente no está disponible temporalmente.");
+      } else {
+        setAnswer("Ocurrió un inconveniente al consultar con el asistente IA.");
+      }
     } finally {
-      setLoadingAnswer(false);
+      if (assistantControllerRef.current === controller) {
+        assistantControllerRef.current = null;
+        setLoadingAnswer(false);
+      }
     }
   }
 
@@ -59,12 +122,13 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
           <ArrowLeft size={16} /> Volver a partidos
         </Link>
         <div className="empty-state">
-          <CircleAlert size={18} /> {error}
+          <CircleAlert size={18} /> <span>{error}</span>
+          <button className="ask-button" type="button" onClick={() => setRetryVersion((value) => value + 1)}>Reintentar</button>
         </div>
       </AppShell>
     );
 
-  if (!analysis)
+  if (loadingAnalysis || !analysis)
     return (
       <AppShell>
         <div className="empty-state">Cargando análisis avanzado y datos del partido...</div>

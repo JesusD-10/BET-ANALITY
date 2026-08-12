@@ -1,15 +1,67 @@
 export const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "https://bet-anality.onrender.com/api/v1";
 export const requestTimeoutMs = 10_000;
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, detail: string) {
+    super(detail);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+export class ApiTimeoutError extends Error {
+  constructor() {
+    super("La solicitud superó el tiempo máximo de espera.");
+    this.name = "ApiTimeoutError";
+  }
+}
+
+export function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+async function throwApiError(response: Response, fallbackDetail: string): Promise<never> {
+  let detail = fallbackDetail;
+
+  try {
+    const payload: unknown = await response.json();
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      "detail" in payload &&
+      typeof payload.detail === "string"
+    ) {
+      detail = payload.detail;
+    }
+  } catch {
+    // Some upstream errors do not include a JSON response body.
+  }
+
+  throw new ApiError(response.status, detail);
+}
+
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const controller = new AbortController();
   const abortFromParent = () => controller.abort();
   if (init.signal?.aborted) controller.abort();
   init.signal?.addEventListener("abort", abortFromParent, { once: true });
-  const timeoutId = globalThis.setTimeout(() => controller.abort(), requestTimeoutMs);
+  let timedOut = false;
+  const timeoutId = globalThis.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, requestTimeoutMs);
 
   try {
     return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut && !init.signal?.aborted) {
+      throw new ApiTimeoutError();
+    }
+    throw error;
   } finally {
     globalThis.clearTimeout(timeoutId);
     init.signal?.removeEventListener("abort", abortFromParent);
@@ -158,22 +210,28 @@ export type Recommendation = {
   away_logo?: string | null;
 };
 
-export async function getMatches(query = "") {
-  const response = await apiFetch(`${apiUrl}/matches/search?q=${encodeURIComponent(query)}`, { cache: "no-store" });
-  if (!response.ok) throw new Error("No se pudo cargar la agenda");
+export async function getMatches(query = "", signal?: AbortSignal) {
+  const response = await apiFetch(`${apiUrl}/matches/search?q=${encodeURIComponent(query)}`, {
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) await throwApiError(response, "No se pudo cargar la agenda");
   return response.json() as Promise<{ matches: Match[]; source: string; notice: string | null }>;
 }
 
-export async function getAnalysis(id: string) {
-  const response = await apiFetch(`${apiUrl}/matches/${id}/analysis`, { cache: "no-store" });
-  if (!response.ok) throw new Error("El análisis no está disponible");
+export async function getAnalysis(id: string, signal?: AbortSignal) {
+  const response = await apiFetch(`${apiUrl}/matches/${encodeURIComponent(id)}/analysis`, {
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) await throwApiError(response, "El análisis no está disponible");
   return response.json() as Promise<Analysis>;
 }
 
 export async function getRecommendations(kind: "daily" | "dreams" = "daily", limit?: number) {
   const query = limit ? `?limit=${limit}` : "";
   const response = await apiFetch(`${apiUrl}/recommendations/${kind}${query}`, { cache: "no-store" });
-  if (!response.ok) throw new Error("No se pudieron cargar las recomendaciones");
+  if (!response.ok) await throwApiError(response, "No se pudieron cargar las recomendaciones");
   return response.json() as Promise<{ recommendations: Recommendation[] }>;
 }
 

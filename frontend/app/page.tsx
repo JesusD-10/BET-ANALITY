@@ -6,7 +6,19 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Activity, ArrowUpRight, BarChart3, CalendarDays, Check, ChevronRight, CircleAlert, Database, Search, ShieldCheck, Sparkles, X } from "lucide-react";
 import DreamRecommendationCard from "./components/DreamRecommendationCard";
-import { apiFetch, apiUrl, getRecommendations, type Analysis, type Match, type Recommendation } from "./lib/api";
+import {
+  ApiError,
+  ApiTimeoutError,
+  apiFetch,
+  apiUrl,
+  getAnalysis,
+  getMatches,
+  getRecommendations,
+  isAbortError,
+  type Analysis,
+  type Match,
+  type Recommendation,
+} from "./lib/api";
 const percent = (value: number) => `${Math.round(value * 100)}%`;
 const formatTime = (value: string) => new Intl.DateTimeFormat("es-PE", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 const formatDate = (value: Date) => new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "2-digit", month: "short", year: "numeric" }).format(value);
@@ -30,6 +42,7 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [catalogNotice, setCatalogNotice] = useState("");
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantText, setAssistantText] = useState("");
   const [assistantReply, setAssistantReply] = useState("");
@@ -38,23 +51,44 @@ export default function Home() {
 
   useEffect(() => {
     const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    setCatalogNotice("");
     const timer = window.setTimeout(async () => {
       try {
-        const response = await apiFetch(`${apiUrl}/matches/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
-        if (!response.ok) throw new Error("No se pudo cargar la agenda");
-        const data = await response.json();
-        setMatches(data.matches);
-        if (!analysis && data.matches[0]) void loadAnalysis(data.matches[0].id).catch(() => setAnalysis(null));
-        setError("");
-      } catch (error) {
+        const data = await getMatches(query, controller.signal);
         if (controller.signal.aborted) return;
-        console.error("ERROR API:", error);
-        setError(`Error API: ${error}`);
+        setMatches(data.matches);
+        setCatalogNotice(data.notice ?? "");
+        setAnalysis(null);
+        setError("");
+        setLoading(false);
+
+        if (data.matches[0]) {
+          try {
+            const nextAnalysis = await getAnalysis(data.matches[0].id, controller.signal);
+            if (!controller.signal.aborted) setAnalysis(nextAnalysis);
+          } catch (analysisError: unknown) {
+            if (!controller.signal.aborted && !isAbortError(analysisError)) setAnalysis(null);
+          }
+        }
+      } catch (requestError: unknown) {
+        if (controller.signal.aborted || isAbortError(requestError)) return;
+        setMatches([]);
+        setAnalysis(null);
+        if (requestError instanceof ApiTimeoutError) {
+          setError("La agenda tardó demasiado en responder. Intenta nuevamente.");
+        } else if (requestError instanceof ApiError && requestError.status >= 500) {
+          setError("El servicio de partidos no está disponible temporalmente.");
+        } else if (requestError instanceof ApiError) {
+          setError(requestError.detail);
+        } else {
+          setError("No pudimos conectar con el catálogo de partidos.");
+        }
       }
-      finally { setLoading(false); }
+      finally { if (!controller.signal.aborted) setLoading(false); }
     }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
 
   useEffect(() => {
@@ -63,12 +97,6 @@ export default function Home() {
       .catch(() => setDreams([]))
       .finally(() => setDreamsLoading(false));
   }, []);
-
-  async function loadAnalysis(id: string) {
-    const response = await apiFetch(`${apiUrl}/matches/${id}/analysis`);
-    if (!response.ok) throw new Error("No se pudo cargar el análisis");
-    setAnalysis(await response.json());
-  }
 
   async function askAssistant() {
     if (!assistantText.trim()) return;
@@ -84,6 +112,7 @@ export default function Home() {
       <aside className="sidebar"><Link className="brand-mark" href="/"><span>BA</span><div><strong>BET</strong><small>ANALIZADOR</small></div></Link><nav className="nav-list" aria-label="Navegacion principal"><Link className="nav-item active" href="/"><BarChart3 size={18} /> Panorama <span>01</span></Link><Link className="nav-item" href="/partidos"><CalendarDays size={18} /> Partidos</Link><Link className="nav-item" href="/recomendaciones"><Sparkles size={18} /> Recomendaciones</Link><Link className="nav-item" href="/sonadoras"><ArrowUpRight size={18} /> Sonadoras</Link><Link className="nav-item" href="/rendimiento"><Activity size={18} /> Rendimiento</Link></nav><div className="sidebar-footer"><CircleAlert size={16} /><span>Analisis informativo.<br />Sin garantias.</span></div></aside>
       <section className="content" id="inicio"><header className="topbar"><div><p className="eyebrow">{formatDate(new Date())} <span className="live-dot" /> MVP EN VIVO</p><h1>Una lectura más clara<br /><em>del fútbol de hoy.</em></h1></div><div className="model-chip"><Database size={15} /> baseline-poisson <span>v0.1</span></div></header>
         <section className="hero-tools" id="partidos"><div className="search-wrap"><Search size={19} /><input aria-label="Buscar partido" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Busca un equipo, liga o partido..." /><kbd>⌘ K</kbd></div><button className="date-button" onClick={() => router.push("/partidos")}><CalendarDays size={17} /> Ver agenda <ChevronRight size={15} /></button></section>
+        {catalogNotice && <p className="data-notice">{catalogNotice}</p>}
         {error && <div className="api-alert"><CircleAlert size={17} /> {error}</div>}
         <section className="section-block">
           <div className="section-heading">
@@ -96,7 +125,7 @@ export default function Home() {
           {loading ? (
             <div className="empty-state">Consultando calendario...</div>
           ) : matches.length === 0 ? (
-            <div className="empty-state">No hay partidos disponibles hoy. Verifica tu token y API.</div>
+            <div className="empty-state">{query.trim() ? `No encontramos partidos para “${query.trim()}”.` : "No hay partidos reales disponibles para hoy."}</div>
           ) : (
             Object.entries(groupedMatches).map(([dateLabel, dayMatches]) => (
               <div key={dateLabel} className="day-group">

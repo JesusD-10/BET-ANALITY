@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 import logging
 import time
 import httpx
@@ -113,6 +114,19 @@ class FootballDataProvider:
         payload = response.json()
         return [self._to_match(item, endpoint) for item in payload.get("matches", []) if self._is_relevant_match(item)]
 
+    def get_fixture(self, fixture_id: str) -> MatchSummary | None:
+        """Resolve one fixture without depending on today's agenda."""
+        clean_id = fixture_id.removeprefix("football-data-")
+        if not clean_id.isdigit():
+            return None
+
+        endpoint = f"{self.base_url}/matches/{clean_id}"
+        response = httpx.get(endpoint, headers=self._headers(), timeout=self.timeout)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return self._to_match(response.json(), endpoint)
+
     def get_head_to_head(self, match_id: str, limit: int = 10) -> list[H2HMatchItem]:
         clean_id = match_id.replace("football-data-", "")
         endpoint = f"{self.base_url}/matches/{clean_id}/head2head"
@@ -225,10 +239,27 @@ football_data_provider = FootballDataProvider(
     settings.football_data_timeout_seconds,
 )
 
-_FIXTURE_CACHE_TTL_SECONDS = 30
+_FIXTURE_CACHE_TTL_SECONDS = 60
+_FIXTURE_STALE_TTL_SECONDS = 15 * 60
+_MATCH_INDEX_TTL_SECONDS = 12 * 60 * 60
+_PROVIDER_RETRY_COOLDOWN_SECONDS = 10
 _ANALYSIS_CACHE_TTL_SECONDS = 120
 _fixture_cache: dict[str, tuple[float, list[MatchSummary]]] = {}
+_fixture_by_id: dict[str, tuple[float, MatchSummary]] = {}
+_provider_retry_after: dict[str, float] = {}
 _analysis_cache: dict[tuple[str, bool], tuple[float, MatchAnalysisResponse]] = {}
+
+
+@dataclass(frozen=True)
+class FixtureResult:
+    date: date
+    matches: list[MatchSummary]
+    source: str
+    notice: str | None = None
+
+
+class MatchProviderUnavailable(RuntimeError):
+    """The configured upstream could not resolve a fixture right now."""
 
 
 def _cache_get(cache: dict, key: object, ttl: int):
@@ -237,13 +268,18 @@ def _cache_get(cache: dict, key: object, ttl: int):
         return None
     stored_at, value = cached
     if time.monotonic() - stored_at > ttl:
-        cache.pop(key, None)
         return None
     return value
 
 
 def _cache_set(cache: dict, key: object, value: object) -> None:
     cache[key] = (time.monotonic(), value)
+
+
+def _index_matches(matches: list[MatchSummary]) -> None:
+    stored_at = time.monotonic()
+    for match in matches:
+        _fixture_by_id[match.id] = (stored_at, match)
 
 
 def _active_provider():
@@ -255,53 +291,140 @@ def _active_provider():
     return mock_provider
 
 
-def get_highlights(match_date: date | None = None) -> list[MatchSummary]:
+def _provider_name(provider: object) -> str:
+    return str(getattr(provider, "provider_name", "mock"))
+
+
+def get_highlights_result(match_date: date | None = None) -> FixtureResult:
     selected_date = match_date or date.today()
     provider = _active_provider()
-    cache_key = f"{getattr(provider, 'provider_name', 'mock')}:{selected_date.isoformat()}"
+    source = _provider_name(provider)
+    cache_key = f"{source}:{selected_date.isoformat()}"
     cached = _cache_get(_fixture_cache, cache_key, _FIXTURE_CACHE_TTL_SECONDS)
     if cached is not None:
-        return cached
+        _index_matches(cached)
+        return FixtureResult(
+            date=selected_date,
+            matches=cached,
+            source=source,
+            notice=(
+                "Proveedor externo no configurado; se muestran fixtures demostrativos."
+                if source == "mock"
+                else None
+            ),
+        )
 
-    matches: list[MatchSummary]
-    if isinstance(provider, APIFootballProvider):
-        try:
-            matches = provider.list_fixtures(selected_date)
-        except Exception as exc:
-            logger.error("Error al obtener partidos desde API-Football: %s. Se usa mock_provider.", exc)
-            matches = mock_provider.list_highlights(selected_date)
-    elif isinstance(provider, FootballDataProvider):
-        try:
-            matches = provider.list_fixtures(selected_date)
-        except Exception as exc:
-            logger.error("Error al obtener partidos desde FootballDataProvider: %s. Se usa mock_provider.", exc)
-            matches = mock_provider.list_highlights(selected_date)
-    else:
+    if provider is mock_provider:
         matches = provider.list_highlights(selected_date)
+        _cache_set(_fixture_cache, cache_key, matches)
+        _index_matches(matches)
+        return FixtureResult(
+            date=selected_date,
+            matches=matches,
+            source="mock",
+            notice="Proveedor externo no configurado; se muestran fixtures demostrativos.",
+        )
 
+    retry_after = _provider_retry_after.get(cache_key, 0.0)
+    if time.monotonic() < retry_after:
+        stale = _cache_get(_fixture_cache, cache_key, _FIXTURE_STALE_TTL_SECONDS)
+        if stale is not None:
+            _index_matches(stale)
+            return FixtureResult(
+                date=selected_date,
+                matches=stale,
+                source=source,
+                notice="El proveedor está temporalmente lento; se muestra la última agenda real disponible.",
+            )
+        return FixtureResult(
+            date=selected_date,
+            matches=[],
+            source=source,
+            notice="El proveedor de partidos no respondió a tiempo. Reintentaremos automáticamente en unos segundos.",
+        )
+
+    try:
+        if isinstance(provider, APIFootballProvider):
+            matches = provider.list_fixtures(selected_date)
+        elif isinstance(provider, FootballDataProvider):
+            matches = provider.list_fixtures(selected_date)
+        else:
+            matches = []
+    except Exception as exc:
+        logger.error("No se pudo actualizar la agenda desde %s: %s", source, exc)
+        _provider_retry_after[cache_key] = time.monotonic() + _PROVIDER_RETRY_COOLDOWN_SECONDS
+        stale = _cache_get(_fixture_cache, cache_key, _FIXTURE_STALE_TTL_SECONDS)
+        if stale is not None:
+            _index_matches(stale)
+            return FixtureResult(
+                date=selected_date,
+                matches=stale,
+                source=source,
+                notice="El proveedor está temporalmente lento; se muestra la última agenda real disponible.",
+            )
+        return FixtureResult(
+            date=selected_date,
+            matches=[],
+            source=source,
+            notice="El proveedor de partidos no respondió a tiempo. No se sustituyeron los datos reales por partidos demo.",
+        )
+
+    _provider_retry_after.pop(cache_key, None)
     _cache_set(_fixture_cache, cache_key, matches)
-    return matches
+    _index_matches(matches)
+    return FixtureResult(date=selected_date, matches=matches, source=source)
+
+
+def get_highlights(match_date: date | None = None) -> list[MatchSummary]:
+    return get_highlights_result(match_date).matches
+
+
+def search_matches_result(query: str | None = None) -> FixtureResult:
+    result = get_highlights_result()
+    if not query:
+        return result
+    needle = query.casefold().strip()
+    matches = [
+        match
+        for match in result.matches
+        if needle in f"{match.home_team} {match.away_team} {match.competition}".casefold()
+    ]
+    return FixtureResult(date=result.date, matches=matches, source=result.source, notice=result.notice)
 
 
 def search_matches(query: str | None = None) -> list[MatchSummary]:
-    matches = get_highlights()
-    if not matches:
-        matches = mock_provider.list_highlights()
-    if not query:
-        return matches
-    needle = query.casefold().strip()
-    result = [match for match in matches if needle in f"{match.home_team} {match.away_team} {match.competition}".casefold()]
-    if not result:
-        result = [match for match in mock_provider.list_highlights() if needle in f"{match.home_team} {match.away_team} {match.competition}".casefold()]
-    return result
+    return search_matches_result(query).matches
 
 
 
 def get_match(match_id: str) -> MatchSummary | None:
-    found = next((match for match in get_highlights() if match.id == match_id), None)
-    if found:
+    cached = _cache_get(_fixture_by_id, match_id, _MATCH_INDEX_TTL_SECONDS)
+    if cached is not None:
+        return cached
+
+    provider = _active_provider()
+    if match_id.startswith("demo-"):
+        if provider is not mock_provider:
+            return None
+        found = next((match for match in mock_provider.list_highlights() if match.id == match_id), None)
+        if found is not None:
+            _index_matches([found])
         return found
-    return next((match for match in mock_provider.list_highlights() if match.id == match_id), None)
+
+    try:
+        if isinstance(provider, APIFootballProvider) and match_id.startswith("api-football-"):
+            found = provider.get_fixture(match_id)
+        elif isinstance(provider, FootballDataProvider) and match_id.startswith("football-data-"):
+            found = provider.get_fixture(match_id)
+        else:
+            return None
+    except Exception as exc:
+        logger.error("No se pudo resolver el partido %s desde %s: %s", match_id, _provider_name(provider), exc)
+        raise MatchProviderUnavailable("El proveedor no pudo resolver el partido a tiempo") from exc
+
+    if found is not None:
+        _index_matches([found])
+    return found
 
 
 
@@ -316,6 +439,7 @@ def _future_value(future: Future | None, default):
 
 
 def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisResponse | None:
+    analysis_started_at = time.monotonic()
     cache_key = (match_id, use_openai)
     cached = _cache_get(_analysis_cache, cache_key, _ANALYSIS_CACHE_TTL_SECONDS)
     if cached is not None:
@@ -405,6 +529,9 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
             tendency="Mantiene control riguroso en mediocampo" if y_avg > 4.5 else "Permite fluidez en transiciones",
         )
 
+    # Leave enough of the 10-second browser budget for serialization/network.
+    # When sports data was slow, the deterministic model answers immediately.
+    openai_has_budget = time.monotonic() - analysis_started_at < 4.5
     analysis = analyze_match_with_ai(
         match=match,
         referee_info=referee_info,
@@ -413,7 +540,7 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
         h2h_matches=h2h_matches,
         home_last_matches=home_history,
         away_last_matches=away_history,
-        allow_openai=use_openai,
+        allow_openai=use_openai and openai_has_budget,
     )
     _cache_set(_analysis_cache, cache_key, analysis)
     return analysis

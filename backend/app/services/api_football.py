@@ -15,6 +15,10 @@ from app.schemas.matches import (
 logger = logging.getLogger(__name__)
 
 
+class APIFootballAPIError(RuntimeError):
+    """Error declarado por API-Football sin exponer el contenido de la respuesta."""
+
+
 class APIFootballProvider:
     """Adaptador profesional para API-Football (v3.football.api-sports.io o RapidAPI)."""
 
@@ -42,68 +46,82 @@ class APIFootballProvider:
             response = httpx.get(url, headers=self._get_headers(), params=params, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
-            if data.get("errors") and isinstance(data["errors"], dict) and len(data["errors"]) > 0:
-                logger.warning("API-Football reportó errores en la respuesta: %s", data["errors"])
-            return data
         except Exception as err:
             logger.error("Error al consultar API-Football en %s: %s", url, err)
             raise
 
+        if not isinstance(data, dict):
+            raise APIFootballAPIError("API-Football devolvió una respuesta con formato inesperado.")
+
+        errors = data.get("errors")
+        if errors:
+            error_count = len(errors) if isinstance(errors, (dict, list, tuple, set)) else 1
+            logger.warning(
+                "API-Football rechazó la solicitud al endpoint %s con %s error(es).",
+                endpoint,
+                error_count,
+            )
+            raise APIFootballAPIError(
+                f"API-Football rechazó la solicitud con {error_count} error(es)."
+            )
+
+        return data
+
+    def _to_match_summary(self, item: dict) -> MatchSummary:
+        fixture = item.get("fixture") or {}
+        league = item.get("league") or {}
+        teams = item.get("teams") or {}
+        home = teams.get("home") or {}
+        away = teams.get("away") or {}
+
+        raw_fixture_id = fixture.get("id")
+        if raw_fixture_id is None:
+            raise ValueError("La respuesta de API-Football no contiene fixture.id.")
+        fixture_id = str(raw_fixture_id)
+
+        kickoff_raw = fixture.get("date")
+        kickoff = datetime.fromisoformat(kickoff_raw.replace("Z", "+00:00")) if kickoff_raw else datetime.now(timezone.utc)
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(tzinfo=timezone.utc)
+
+        home_team_id = str(home["id"]) if home.get("id") is not None else None
+        away_team_id = str(away["id"]) if away.get("id") is not None else None
+        status_short = (fixture.get("status") or {}).get("short", "NS")
+
+        return MatchSummary(
+            id=f"api-football-{fixture_id}",
+            external_id=fixture_id,
+            competition=league.get("name") or "Competición",
+            kickoff_at=kickoff,
+            home_team=home.get("name") or "Local",
+            away_team=away.get("name") or "Visitante",
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            home_logo=home.get("logo"),
+            away_logo=away.get("logo"),
+            venue=(fixture.get("venue") or {}).get("name"),
+            referee=fixture.get("referee"),
+            data_quality=0.95,
+            odds_available=True,
+            status=self._normalize_status(status_short),
+            source_provider=self.provider_name,
+            source_url=f"{self.base_url}/fixtures?id={fixture_id}",
+        )
+
     def list_fixtures(self, match_date: date | None = None) -> list[MatchSummary]:
         target_date = (match_date or date.today()).isoformat()
         data = self._request("fixtures", params={"date": target_date})
-        response_list = data.get("response", [])
-        
-        matches = []
-        for item in response_list:
-            fixture = item.get("fixture", {})
-            league = item.get("league", {})
-            teams = item.get("teams", {})
+        return [self._to_match_summary(item) for item in data.get("response", [])]
 
-            fixture_id = str(fixture.get("id"))
-            kickoff_raw = fixture.get("date")
-            kickoff = datetime.fromisoformat(kickoff_raw.replace("Z", "+00:00")) if kickoff_raw else datetime.now(timezone.utc)
-            if kickoff.tzinfo is None:
-                kickoff = kickoff.replace(tzinfo=timezone.utc)
-
-            home_team = teams.get("home", {}).get("name", "Local")
-            away_team = teams.get("away", {}).get("name", "Visitante")
-            home_team_id = str(teams.get("home", {}).get("id")) if teams.get("home", {}).get("id") else None
-            away_team_id = str(teams.get("away", {}).get("id")) if teams.get("away", {}).get("id") else None
-            home_logo = teams.get("home", {}).get("logo")
-            away_logo = teams.get("away", {}).get("logo")
-
-            status_short = fixture.get("status", {}).get("short", "NS")
-            status_desc = self._normalize_status(status_short)
-
-            referee = fixture.get("referee")
-            venue_name = fixture.get("venue", {}).get("name")
-
-            matches.append(
-                MatchSummary(
-                    id=f"api-football-{fixture_id}",
-                    external_id=fixture_id,
-                    competition=league.get("name") or "Competición",
-                    kickoff_at=kickoff,
-                    home_team=home_team,
-                    away_team=away_team,
-                    home_team_id=home_team_id,
-                    away_team_id=away_team_id,
-                    home_logo=home_logo,
-                    away_logo=away_logo,
-                    venue=venue_name,
-                    referee=referee,
-                    data_quality=0.95,
-                    odds_available=True,
-                    status=status_desc,
-                    source_provider=self.provider_name,
-                    source_url=f"{self.base_url}/fixtures?id={fixture_id}",
-                )
-            )
-        return matches
+    def get_fixture(self, fixture_id: str) -> MatchSummary | None:
+        clean_id = fixture_id.removeprefix("api-football-")
+        if not clean_id.isdigit():
+            return None
+        details = self.get_fixture_details(clean_id)
+        return self._to_match_summary(details) if details is not None else None
 
     def get_fixture_details(self, fixture_id: str) -> dict | None:
-        clean_id = fixture_id.replace("api-football-", "")
+        clean_id = fixture_id.removeprefix("api-football-")
         data = self._request("fixtures", params={"id": clean_id})
         res = data.get("response", [])
         return res[0] if res else None

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ArrowUpRight, Search } from "lucide-react";
 import AppShell, { PageHeader, ResponsibleNote } from "../components/AppShell";
-import { getMatches, type Match } from "../lib/api";
+import { ApiError, ApiTimeoutError, getMatches, isAbortError, type Match } from "../lib/api";
 
 const groupMatchesByDate = (matchesList: Match[]) => {
   const groups: { [key: string]: Match[] } = {};
@@ -24,13 +24,46 @@ export default function PartidosPage() {
   const [matches, setMatches] = useState<Match[]>([]);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [retryVersion, setRetryVersion] = useState(0);
 
   useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    setNotice("");
+
     const timer = window.setTimeout(() => {
-      getMatches(query).then((data) => { setMatches(data.matches); setNotice(data.notice ?? ""); setError(""); }).catch(() => setError("No se pudo conectar con el catálogo de partidos."));
+      getMatches(query, controller.signal)
+        .then((data) => {
+          if (controller.signal.aborted) return;
+          setMatches(data.matches);
+          setNotice(data.notice ?? "");
+        })
+        .catch((requestError: unknown) => {
+          if (controller.signal.aborted || isAbortError(requestError)) return;
+
+          setMatches([]);
+          setNotice("");
+          if (requestError instanceof ApiTimeoutError) {
+            setError("La agenda tardó demasiado en responder. Intenta nuevamente.");
+          } else if (requestError instanceof ApiError && requestError.status >= 500) {
+            setError("El servicio de partidos no está disponible temporalmente.");
+          } else if (requestError instanceof ApiError) {
+            setError(requestError.detail);
+          } else {
+            setError("No se pudo conectar con el catálogo de partidos.");
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false);
+        });
     }, 250);
-    return () => window.clearTimeout(timer);
-  }, [query]);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query, retryVersion]);
 
   const grouped = groupMatchesByDate(matches);
 
@@ -38,9 +71,14 @@ export default function PartidosPage() {
     <AppShell>
       <PageHeader eyebrow="AGENDA · BÚSQUEDA Y CALENDARIO" title="Partidos" action={<Link className="outline-link" href="/">Volver al panorama <ArrowUpRight size={15} /></Link>} />
       <div className="page-toolbar"><div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Equipo, liga o competición" /></div><span className="date-label">Organizados por fecha</span></div>
-      {notice && <p className="data-notice">{notice}</p>}{error && <p className="api-alert">{error}</p>}
+      {notice && <p className="data-notice">{notice}</p>}
+      {error && <div className="api-alert"><span>{error}</span><button className="text-button" type="button" onClick={() => setRetryVersion((value) => value + 1)}>Reintentar</button></div>}
       <section className="match-list">
-        {Object.entries(grouped).map(([dateLabel, dayMatches]) => (
+        {loading ? (
+          <div className="empty-state">Consultando calendario...</div>
+        ) : error ? null : matches.length === 0 ? (
+          <div className="empty-state">{query.trim() ? `No encontramos partidos para “${query.trim()}”.` : "No hay partidos disponibles para hoy."}</div>
+        ) : Object.entries(grouped).map(([dateLabel, dayMatches]) => (
           <div key={dateLabel}>
             <div className="date-group-header">{dateLabel}</div>
             {dayMatches.map((match) => (
