@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.schemas.matches import MatchSummary, RefereeInfo, InjuryItem, H2HMatchItem
 from app.services.ai_analyzer import (
     _available_market_families,
+    _format_recent_history,
     _generate_local_fallback_analysis,
     analyze_match_with_ai,
 )
@@ -108,14 +109,54 @@ def test_advanced_families_activate_only_from_explicit_statistics():
         None,
         [
             {
-                "statistics": {"corners": 8, "shots": 14},
-                "players": [{"player": "Delantero", "shots": 3, "goals": 1}],
+                "statistics": [{"corners": 8, "total_shots": 14}],
+                "player_statistics": [
+                    {
+                        "player": {"name": "Delantero"},
+                        "shots": {"total": 3},
+                        "goals": {"total": 1},
+                    }
+                ],
             }
         ],
         [],
     )
 
     assert {"corners", "team_shots", "player_shots", "player_goals"}.issubset(families)
+    assert "player_shots_on_target" not in families
+
+
+def test_player_shots_do_not_enable_team_shots_and_null_does_not_enable_market():
+    families = _available_market_families(
+        None,
+        [
+            {
+                "statistics": [{"corners": None}],
+                "player_statistics": [{"shots": {"total": 2, "on_target": None}}],
+            }
+        ],
+        [],
+    )
+
+    assert "player_shots" in families
+    assert "player_shots_on_target" not in families
+    assert "team_shots" not in families
+    assert "corners" not in families
+
+
+def test_prompt_history_omits_duplicate_raw_player_payload():
+    text = _format_recent_history(
+        [
+            {
+                "fixture": {"date": "2026-08-10"},
+                "players": [{"large": "raw-payload"}],
+                "player_statistics": [{"player": {"name": "Nueve"}, "shots": {"total": 3}}],
+            }
+        ]
+    )
+
+    assert "player_statistics" in text
+    assert "raw-payload" not in text
 
 
 def test_normalized_recent_matches_are_accepted_without_enabling_advanced_markets():

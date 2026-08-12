@@ -13,7 +13,12 @@ from app.schemas.matches import (
     MatchSummary,
     RefereeInfo,
 )
-from app.services.matches import _analysis_cache, _fixture_cache
+from app.services.api_football import BookmakerQuote
+from app.services.matches import (
+    _analysis_cache,
+    _apply_verified_market_odds,
+    _fixture_cache,
+)
 from app.services.ai_analyzer import analyze_match_with_ai
 from app.services.opportunities import (
     MARKET_TAXONOMY,
@@ -294,6 +299,62 @@ def test_enrichment_passes_gated_markets_to_advanced_builders() -> None:
 
     assert any(item.kind == "advanced-builder" for item in enriched.combinations)
     assert any(item.kind == "advanced-builder" for item in enriched.dream_picks)
+
+
+def test_verified_odds_overlay_sets_bookmaker_ev_without_pricing_builders() -> None:
+    markets = [
+        MarketAnalysis(
+            market_key="TOTAL_GOALS_OVER_2_5",
+            label="Goles",
+            selection="Más de 2.5",
+            probability=0.58,
+            fair_odds=1.72,
+            confidence="Media",
+            data_quality=0.8,
+            factors_for=["Forma reciente"],
+            risks=["Varianza"],
+        ),
+        MarketAnalysis(
+            market_key="BOTH_TEAMS_TO_SCORE",
+            label="Ambos anotan",
+            selection="No",
+            probability=0.45,
+            fair_odds=2.22,
+            confidence="Media",
+            data_quality=0.8,
+            factors_for=["Defensas"],
+            risks=["Gol temprano"],
+        ),
+    ]
+    analysis = MatchAnalysisResponse(
+        match=_match(),
+        model_version="test-model",
+        updated_at=datetime.now(timezone.utc),
+        markets=markets,
+        notes=[],
+    )
+    quotes = {
+        "TOTAL_GOALS_OVER_2_5": BookmakerQuote(
+            market_key="TOTAL_GOALS_OVER_2_5",
+            odds=1.95,
+            bookmaker="Casa real",
+        ),
+        "BOTH_TEAMS_TO_SCORE": BookmakerQuote(
+            market_key="BOTH_TEAMS_TO_SCORE",
+            odds=2.10,
+            bookmaker="Otra casa",
+        ),
+    }
+
+    enriched = _apply_verified_market_odds(analysis, quotes)
+
+    assert enriched.match.odds_available is True
+    assert enriched.markets[0].best_odds == 1.95
+    assert enriched.markets[0].bookmaker == "Casa real"
+    assert enriched.markets[0].expected_value == round(0.58 * 1.95 - 1, 3)
+    assert enriched.markets[1].best_odds is None
+    assert all(item.best_odds is None for item in enriched.combinations)
+    assert all(item.expected_value is None for item in enriched.combinations)
 
 
 def test_cards_are_omitted_from_generated_builders_without_referee_metrics() -> None:

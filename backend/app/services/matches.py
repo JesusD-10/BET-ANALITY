@@ -3,6 +3,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 import logging
 import time
+from zoneinfo import ZoneInfo
 import httpx
 
 from app.core.config import settings
@@ -15,16 +16,18 @@ from app.schemas.matches import (
     RefereeInfo,
 )
 from app.services.ai_analyzer import analyze_match_with_ai
-from app.services.api_football import APIFootballProvider
+from app.services.api_football import APIFootballProvider, BookmakerQuote
+from app.services.opportunities import enrich_analysis_with_opportunities
 
 logger = logging.getLogger(__name__)
+SPORTS_TIMEZONE = ZoneInfo("America/Lima")
 
 
 class MockSportsDataProvider:
     """Datos demostrativos aislados para desarrollar la interfaz sin proveedor real."""
 
     def list_highlights(self, match_date: date | None = None) -> list[MatchSummary]:
-        selected_date = match_date or date.today()
+        selected_date = match_date or datetime.now(SPORTS_TIMEZONE).date()
         return [
             MatchSummary(
                 id="demo-arsenal-chelsea",
@@ -41,7 +44,7 @@ class MockSportsDataProvider:
                 home_form="W-W-D-W-L",
                 away_form="D-W-L-W-W",
                 data_quality=0.91,
-                odds_available=True,
+                odds_available=False,
                 status="PROGRAMADO",
                 source_provider="mock",
             ),
@@ -79,7 +82,7 @@ class MockSportsDataProvider:
                 home_form="W-D-W-W-W",
                 away_form="L-W-D-W-D",
                 data_quality=0.78,
-                odds_available=True,
+                odds_available=False,
                 status="PROGRAMADO",
                 source_provider="mock",
             ),
@@ -260,7 +263,10 @@ _FIXTURE_CACHE_TTL_SECONDS = 60
 _FIXTURE_STALE_TTL_SECONDS = 15 * 60
 _MATCH_INDEX_TTL_SECONDS = 12 * 60 * 60
 _PROVIDER_RETRY_COOLDOWN_SECONDS = 10
-_ANALYSIS_CACHE_TTL_SECONDS = 120
+# The official complementary resources update between one and fifteen minutes.
+# Reusing one analysis for ten minutes protects the API-Sports per-minute quota
+# and makes repeat detail visits immediate.
+_ANALYSIS_CACHE_TTL_SECONDS = 10 * 60
 _fixture_cache: dict[str, tuple[float, list[MatchSummary]]] = {}
 _fixture_by_id: dict[str, tuple[float, MatchSummary]] = {}
 _provider_retry_after: dict[str, float] = {}
@@ -318,7 +324,7 @@ def _provider_name(provider: object) -> str:
 
 
 def get_highlights_result(match_date: date | None = None) -> FixtureResult:
-    selected_date = match_date or date.today()
+    selected_date = match_date or datetime.now(SPORTS_TIMEZONE).date()
     provider = _active_provider()
     source = _provider_name(provider)
     cache_key = f"{source}:{selected_date.isoformat()}"
@@ -460,6 +466,33 @@ def _future_value(future: Future | None, default):
         return default
 
 
+def _apply_verified_market_odds(
+    analysis: MatchAnalysisResponse,
+    quotes: dict[str, BookmakerQuote],
+) -> MatchAnalysisResponse:
+    """Overlay only exact bookmaker selections returned by API-Football."""
+
+    analysis.match.odds_available = bool(quotes)
+    matched_quote = False
+    for market in analysis.markets:
+        quote = quotes.get(market.market_key)
+        if quote is None:
+            continue
+        if market.market_key == "BOTH_TEAMS_TO_SCORE" and market.selection.casefold() not in {
+            "sí",
+            "si",
+            "yes",
+        }:
+            continue
+        market.best_odds = quote.odds
+        market.bookmaker = quote.bookmaker
+        market.expected_value = round(market.probability * quote.odds - 1.0, 3)
+        matched_quote = True
+
+    # Rebuild dream picks so a verified 3+ price can qualify a simple market.
+    return enrich_analysis_with_opportunities(analysis) if matched_quote else analysis
+
+
 def _history_item(
     match_date: date,
     competition: str,
@@ -547,11 +580,12 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
     away_history: list[dict] = []
     home_recent_matches: list[H2HMatchItem] = []
     away_recent_matches: list[H2HMatchItem] = []
+    odds_quotes: dict[str, BookmakerQuote] = {}
 
     provider = _active_provider()
     if isinstance(provider, APIFootballProvider) and match.id.startswith("api-football-"):
         fixture_id = match.external_id or match.id.replace("api-football-", "")
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             injuries_future = executor.submit(provider.get_fixture_injuries, fixture_id)
             lineups_future = executor.submit(
                 provider.get_fixture_lineups,
@@ -559,19 +593,25 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
                 match.home_team_id,
                 match.away_team_id,
             )
+            odds_future = executor.submit(provider.get_fixture_odds, fixture_id)
             h2h_future = None
             home_future = None
             away_future = None
             if match.home_team_id and match.away_team_id:
                 h2h_future = executor.submit(provider.get_head_to_head, match.home_team_id, match.away_team_id, 10)
-                home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 5)
-                away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 5)
+                home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 5, False)
+                away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 5, False)
 
             injuries = _future_value(injuries_future, [])
             lineups = _future_value(lineups_future, None)
             h2h_matches = _future_value(h2h_future, [])
             home_history = _future_value(home_future, [])
             away_history = _future_value(away_future, [])
+            odds_quotes = _future_value(odds_future, {})
+            home_history, away_history = provider.enrich_fixture_histories(
+                home_history,
+                away_history,
+            )
             home_recent_matches = provider.normalize_history(home_history, 5)
             away_recent_matches = provider.normalize_history(away_history, 5)
 
@@ -631,6 +671,7 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
         away_last_matches=away_history,
         allow_openai=use_openai and openai_has_budget,
     )
+    analysis = _apply_verified_market_odds(analysis, odds_quotes)
     analysis.home_recent_matches = home_recent_matches[:5]
     analysis.away_recent_matches = away_recent_matches[:5]
     _cache_set(_analysis_cache, cache_key, analysis)

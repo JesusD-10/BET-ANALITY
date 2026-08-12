@@ -92,6 +92,15 @@ En Render, agrega estas variables únicamente al servicio **backend** desde
 debe ponerse en el frontend, en una variable `NEXT_PUBLIC_*` ni confirmarse en Git.
 Después de guardar las variables, ejecuta un redeploy del backend.
 
+La referencia canónica de endpoints y parámetros es la
+[documentación oficial API-Football v3](https://www.api-football.com/documentation-v3).
+El adaptador agrupa hasta cinco IDs mediante `fixtures?ids=...` para obtener los
+bloques disponibles de estadísticas y jugadores sin multiplicar llamadas. Los
+campos `null` se consideran datos no disponibles, nunca valores cero.
+En el detalle se consulta `odds?fixture=...` y solo se aplican cotizaciones que
+coinciden exactamente con mercado, selección, línea y periodo; las combinadas
+generadas conservan su cuota justa y nunca multiplican precios individuales.
+
 Todas las solicitudes del navegador se cancelan a los 10 segundos. Las llamadas del backend usan presupuestos menores y fallback local para evitar esperas prolongadas.
 
 ---

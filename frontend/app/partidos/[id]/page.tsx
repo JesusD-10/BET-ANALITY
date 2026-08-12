@@ -284,7 +284,10 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                 </div>
                 <div className="market-numbers">
                   <span>Cuota justa <b>{market.fair_odds.toFixed(2)}</b></span>
-                  <span>Mejor cuota <b>{market.best_odds?.toFixed(2) ?? "--"}</b></span>
+                  <span>
+                    {market.bookmaker ? `Mejor cuota · ${market.bookmaker}` : "Mejor cuota"}{" "}
+                    <b>{market.best_odds?.toFixed(2) ?? "--"}</b>
+                  </span>
                   <span>EV <b>{market.expected_value === null ? "No disponible" : `${Math.round(market.expected_value * 100)}%`}</b></span>
                 </div>
                 <div className="market-evidence">

@@ -22,25 +22,37 @@ from app.services.opportunities import (
 logger = logging.getLogger(__name__)
 
 
-def _iter_key_paths(value: object, prefix: str = ""):
-    if hasattr(value, "model_dump"):
-        value = value.model_dump()
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            path = f"{prefix}.{key}" if prefix else str(key)
-            yield path.lower()
-            yield from _iter_key_paths(nested, path)
-    elif isinstance(value, list):
-        for nested in value:
-            yield from _iter_key_paths(nested, prefix)
+def _provider_blocks(
+    history: list[dict | H2HMatchItem],
+    key: str,
+):
+    """Yield canonical provider blocks, never inferring metrics from raw names."""
+
+    for item in history:
+        if hasattr(item, "model_dump"):
+            item = item.model_dump()
+        if not isinstance(item, dict):
+            continue
+        value = item.get(key)
+        if isinstance(value, dict):
+            yield value
+        elif isinstance(value, list):
+            yield from (block for block in value if isinstance(block, dict))
 
 
-def _has_stat_key(history: list[dict | H2HMatchItem], *terms: str) -> bool:
-    normalized_terms = tuple(term.lower() for term in terms)
-    return any(
-        all(term in path for term in normalized_terms)
-        for path in _iter_key_paths(history)
-    )
+def _has_metric(blocks: list[dict], *path: str) -> bool:
+    for block in blocks:
+        value: object = block
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                break
+            value = value[key]
+        else:
+            # Explicit zero is valid evidence; null means the provider did not
+            # collect that statistic for the fixture.
+            if value is not None:
+                return True
+    return False
 
 
 def _available_market_families(
@@ -49,24 +61,24 @@ def _available_market_families(
     away_history: list[dict | H2HMatchItem],
 ) -> set[str]:
     histories = [*home_history, *away_history]
+    team_statistics = list(_provider_blocks(histories, "statistics"))
+    player_statistics = list(_provider_blocks(histories, "player_statistics"))
     available = {"result", "goals"}
 
     if (
         referee_info
         and (referee_info.yellow_cards_avg is not None or referee_info.red_cards_avg is not None)
-    ) or _has_stat_key(histories, "card"):
+    ) or _has_metric(team_statistics, "yellow_cards") or _has_metric(team_statistics, "red_cards"):
         available.add("cards")
-    if _has_stat_key(histories, "corner"):
+    if _has_metric(team_statistics, "corners"):
         available.add("corners")
-    if _has_stat_key(histories, "shot") or _has_stat_key(histories, "remate"):
+    if _has_metric(team_statistics, "total_shots") or _has_metric(team_statistics, "shots_on_target"):
         available.add("team_shots")
-    if _has_stat_key(histories, "player", "shot") or _has_stat_key(histories, "jugador", "remate"):
-        available.update({"player_shots", "player_shots_on_target"})
-    if (
-        _has_stat_key(histories, "player", "goal")
-        or _has_stat_key(histories, "player", "scored")
-        or _has_stat_key(histories, "jugador", "gol")
-    ):
+    if _has_metric(player_statistics, "shots", "total"):
+        available.add("player_shots")
+    if _has_metric(player_statistics, "shots", "on_target"):
+        available.add("player_shots_on_target")
+    if _has_metric(player_statistics, "goals", "total"):
         available.add("player_goals")
     return available
 
@@ -96,9 +108,9 @@ def _format_recent_history(history: list[dict | H2HMatchItem], limit: int = 5) -
             "away": (teams.get("away") or {}).get("name") or (item.get("awayTeam") or {}).get("name") or item.get("away_team"),
             "goals": item.get("goals") or score.get("fullTime") or item.get("score"),
         }
-        # Future providers may attach the evidence needed for advanced markets.
-        # Preserve those explicit blocks while omitting unrelated fixture noise.
-        for key in ("statistics", "player_statistics", "players"):
+        # Only canonical blocks enter the prompt. The raw ``players`` payload
+        # duplicates these values and can be much larger.
+        for key in ("statistics", "player_statistics"):
             if item.get(key) is not None:
                 compact[key] = item[key]
         compact_items.append({key: value for key, value in compact.items() if value is not None})

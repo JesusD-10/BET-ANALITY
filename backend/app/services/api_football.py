@@ -1,6 +1,11 @@
 from datetime import date, datetime, timezone
 from copy import deepcopy
+from dataclasses import dataclass
 import logging
+import math
+import re
+import time
+from zoneinfo import ZoneInfo
 import httpx
 
 from app.schemas.matches import (
@@ -14,22 +19,34 @@ from app.schemas.matches import (
 )
 
 logger = logging.getLogger(__name__)
+SPORTS_TIMEZONE = ZoneInfo("America/Lima")
 
 
 class APIFootballAPIError(RuntimeError):
     """Error declarado por API-Football sin exponer el contenido de la respuesta."""
 
 
+@dataclass(frozen=True)
+class BookmakerQuote:
+    market_key: str
+    odds: float
+    bookmaker: str
+    updated_at: str | None = None
+
+
 class APIFootballProvider:
     """Adaptador profesional para API-Football (v3.football.api-sports.io o RapidAPI)."""
 
     provider_name = "api-football"
+    _ODDS_CACHE_TTL_SECONDS = 3 * 60 * 60
+    _ODDS_EMPTY_CACHE_TTL_SECONDS = 15 * 60
 
     def __init__(self, key: str, base_url: str = "https://v3.football.api-sports.io", is_rapidapi: bool = False, timeout: int = 3) -> None:
         self.key = key
         self.base_url = base_url.rstrip("/")
         self.is_rapidapi = is_rapidapi
         self.timeout = timeout
+        self._odds_cache: dict[str, tuple[float, dict[str, BookmakerQuote]]] = {}
 
     def _get_headers(self) -> dict[str, str]:
         if self.is_rapidapi:
@@ -46,6 +63,8 @@ class APIFootballProvider:
         try:
             response = httpx.get(url, headers=self._get_headers(), params=params, timeout=self.timeout)
             response.raise_for_status()
+            if response.status_code == 204:
+                return {"errors": [], "results": 0, "response": []}
             data = response.json()
         except Exception as err:
             logger.error("Error al consultar API-Football en %s: %s", url, err)
@@ -112,8 +131,11 @@ class APIFootballProvider:
         )
 
     def list_fixtures(self, match_date: date | None = None) -> list[MatchSummary]:
-        target_date = (match_date or date.today()).isoformat()
-        data = self._request("fixtures", params={"date": target_date})
+        target_date = (match_date or datetime.now(SPORTS_TIMEZONE).date()).isoformat()
+        data = self._request(
+            "fixtures",
+            params={"date": target_date, "timezone": SPORTS_TIMEZONE.key},
+        )
         return [self._to_match_summary(item) for item in data.get("response", [])]
 
     def get_fixture(self, fixture_id: str) -> MatchSummary | None:
@@ -129,7 +151,99 @@ class APIFootballProvider:
         res = data.get("response", [])
         return res[0] if res else None
 
-    def get_team_last_matches(self, team_id: str, limit: int = 5) -> list[dict]:
+    @staticmethod
+    def _line_market_key(prefix: str, value: str) -> str | None:
+        match = re.fullmatch(r"(Over|Under)\s+(\d+(?:\.\d+)?)", value.strip(), re.IGNORECASE)
+        if match is None:
+            return None
+        side = match.group(1).upper()
+        line = match.group(2).replace(".", "_")
+        return f"{prefix}_{side}_{line}"
+
+    @classmethod
+    def _prematch_market_key(cls, bet_name: object, selection: object) -> str | None:
+        """Map only exact full-time API-Football markets used by the model."""
+
+        bet = " ".join(str(bet_name).split()).casefold()
+        value = " ".join(str(selection).split())
+        normalized_value = value.casefold()
+
+        if bet == "match winner":
+            return {
+                "home": "WINNER_HOME",
+                "draw": "WINNER_DRAW",
+                "away": "WINNER_AWAY",
+            }.get(normalized_value)
+        if bet == "goals over/under":
+            return cls._line_market_key("TOTAL_GOALS", value)
+        if bet == "both teams score" and normalized_value == "yes":
+            return "BOTH_TEAMS_TO_SCORE"
+        if bet == "double chance":
+            return {
+                "home/draw": "DOUBLE_CHANCE_HOME_DRAW",
+                "draw/away": "DOUBLE_CHANCE_AWAY_DRAW",
+                "home/away": "DOUBLE_CHANCE_HOME_AWAY",
+            }.get(normalized_value)
+        if bet == "corners over under":
+            return cls._line_market_key("TOTAL_CORNERS", value)
+        if bet == "home corners over/under":
+            return cls._line_market_key("TEAM_CORNERS_HOME", value)
+        if bet == "away corners over/under":
+            return cls._line_market_key("TEAM_CORNERS_AWAY", value)
+        return None
+
+    def get_fixture_odds(self, fixture_id: str) -> dict[str, BookmakerQuote]:
+        """Return the best verified pre-match quote for each exact selection."""
+
+        clean_id = fixture_id.removeprefix("api-football-")
+        if not clean_id.isdigit():
+            return {}
+
+        cached = self._odds_cache.get(clean_id)
+        if cached is not None:
+            stored_at, quotes = cached
+            ttl = self._ODDS_CACHE_TTL_SECONDS if quotes else self._ODDS_EMPTY_CACHE_TTL_SECONDS
+            if time.monotonic() - stored_at <= ttl:
+                return quotes.copy()
+
+        data = self._request("odds", params={"fixture": clean_id})
+        quotes: dict[str, BookmakerQuote] = {}
+        for fixture_odds in data.get("response", []):
+            updated_at = fixture_odds.get("update")
+            for bookmaker_data in fixture_odds.get("bookmakers") or []:
+                bookmaker = str(bookmaker_data.get("name") or "").strip()
+                if not bookmaker:
+                    continue
+                for bet in bookmaker_data.get("bets") or []:
+                    bet_name = bet.get("name")
+                    for offered in bet.get("values") or []:
+                        market_key = self._prematch_market_key(bet_name, offered.get("value"))
+                        if market_key is None:
+                            continue
+                        try:
+                            odds = float(offered.get("odd"))
+                        except (TypeError, ValueError):
+                            continue
+                        if not math.isfinite(odds) or odds <= 1:
+                            continue
+                        current = quotes.get(market_key)
+                        if current is None or odds > current.odds:
+                            quotes[market_key] = BookmakerQuote(
+                                market_key=market_key,
+                                odds=odds,
+                                bookmaker=bookmaker,
+                                updated_at=str(updated_at) if updated_at else None,
+                            )
+
+        self._odds_cache[clean_id] = (time.monotonic(), quotes.copy())
+        return quotes
+
+    def get_team_last_matches(
+        self,
+        team_id: str,
+        limit: int = 5,
+        enrich: bool = True,
+    ) -> list[dict]:
         """Return up to five recent fixtures enriched with canonical statistics.
 
         The regular ``team`` lookup does not always embed statistics and player
@@ -146,17 +260,28 @@ class APIFootballProvider:
             reverse=True,
         )[:bounded_limit]
 
-        fixture_ids = [
-            str(fixture_id)
-            for item in raw_items
-            if (fixture_id := (item.get("fixture") or {}).get("id")) is not None
-        ]
-        needs_enrichment = any(
-            not item.get("statistics") or not item.get("players")
-            for item in raw_items
-        )
+        if not enrich:
+            return raw_items
+        return self.enrich_fixture_histories(raw_items)[0]
 
-        if raw_items and fixture_ids and needs_enrichment:
+    def enrich_fixture_histories(
+        self,
+        *histories: list[dict],
+    ) -> tuple[list[dict], ...]:
+        """Enrich several team histories through one documented ``ids`` call."""
+
+        fixture_ids: list[str] = []
+        for history in histories:
+            for item in history:
+                fixture_id = (item.get("fixture") or {}).get("id")
+                needs_enrichment = not item.get("statistics") or not item.get("players")
+                if fixture_id is not None and needs_enrichment:
+                    clean_id = str(fixture_id)
+                    if clean_id not in fixture_ids:
+                        fixture_ids.append(clean_id)
+
+        enriched_by_id: dict[str, dict] = {}
+        if fixture_ids:
             try:
                 batch = self._request("fixtures", params={"ids": "-".join(fixture_ids)})
                 enriched_by_id = {
@@ -164,20 +289,24 @@ class APIFootballProvider:
                     for item in batch.get("response", [])
                     if (fixture_id := (item.get("fixture") or {}).get("id")) is not None
                 }
-                raw_items = [
-                    self._merge_payloads(
-                        item,
-                        enriched_by_id.get(str((item.get("fixture") or {}).get("id")), {}),
-                    )
-                    for item in raw_items
-                ]
             except Exception as exc:
                 logger.warning(
                     "No se pudo enriquecer el historial de API-Football; se conserva la respuesta base: %s",
                     exc,
                 )
 
-        return [self._normalize_history_payload(item) for item in raw_items]
+        return tuple(
+            [
+                self._normalize_history_payload(
+                    self._merge_payloads(
+                        item,
+                        enriched_by_id.get(str((item.get("fixture") or {}).get("id")), {}),
+                    )
+                )
+                for item in history
+            ]
+            for history in histories
+        )
 
     @classmethod
     def _merge_payloads(cls, base: dict, enriched: dict) -> dict:
@@ -200,7 +329,7 @@ class APIFootballProvider:
         """Keep provider meaning while converting simple numeric strings."""
 
         if value is None:
-            return 0
+            return None
         if not isinstance(value, str):
             return value
         stripped = value.strip()
@@ -239,7 +368,9 @@ class APIFootballProvider:
                     raw_type = metric.get("type")
                     canonical_name = metric_names.get(str(raw_type).strip().casefold())
                     if canonical_name is not None:
-                        metrics[canonical_name] = cls._metric_value(metric.get("value"))
+                        metric_value = cls._metric_value(metric.get("value"))
+                        if metric_value is not None:
+                            metrics[canonical_name] = metric_value
             if metrics:
                 normalized.append({"team": team, **metrics})
         return normalized
@@ -272,16 +403,24 @@ class APIFootballProvider:
                     if isinstance(raw_shots, dict):
                         shots: dict[str, object] = {}
                         if "total" in raw_shots:
-                            shots["total"] = cls._metric_value(raw_shots.get("total"))
+                            total_shots = cls._metric_value(raw_shots.get("total"))
+                            if total_shots is not None:
+                                shots["total"] = total_shots
                         if "on" in raw_shots:
-                            shots["on_target"] = cls._metric_value(raw_shots.get("on"))
+                            shots_on_target = cls._metric_value(raw_shots.get("on"))
+                            if shots_on_target is not None:
+                                shots["on_target"] = shots_on_target
                         elif "on_target" in raw_shots:
-                            shots["on_target"] = cls._metric_value(raw_shots.get("on_target"))
+                            shots_on_target = cls._metric_value(raw_shots.get("on_target"))
+                            if shots_on_target is not None:
+                                shots["on_target"] = shots_on_target
                         if shots:
                             item["shots"] = shots
                     raw_goals = statistic.get("goals")
                     if isinstance(raw_goals, dict) and "total" in raw_goals:
-                        item["goals"] = {"total": cls._metric_value(raw_goals.get("total"))}
+                        goals_total = cls._metric_value(raw_goals.get("total"))
+                        if goals_total is not None:
+                            item["goals"] = {"total": goals_total}
                     if "shots" in item or "goals" in item:
                         normalized.append(item)
         return normalized
@@ -354,14 +493,15 @@ class APIFootballProvider:
             player = item.get("player", {}).get("name", "Jugador")
             team = item.get("team", {}).get("name", "Equipo")
             reason = item.get("player", {}).get("reason", "Baja por lesión/sanción")
-            injury_type = item.get("player", {}).get("type", "Lesión")
+            injury_type = item.get("player", {}).get("type", "Sin clasificar")
+            status = "Duda" if str(injury_type).casefold() == "questionable" else "Baja confirmada"
 
             items.append(
                 InjuryItem(
                     player=player,
                     team=team,
                     reason=reason,
-                    status="Baja confirmada",
+                    status=status,
                     type=injury_type,
                 )
             )
@@ -445,13 +585,19 @@ class APIFootballProvider:
             "1H": "EN JUEGO (1T)",
             "HT": "ENTRETIEMPO",
             "2H": "EN JUEGO (2T)",
+            "BT": "DESCANSO",
             "ET": "TIEMPO EXTRA",
             "P": "PENALES",
+            "LIVE": "EN JUEGO",
             "FT": "FINALIZADO",
             "AET": "FINALIZADO (ET)",
             "PEN": "FINALIZADO (PEN)",
             "PST": "POSPUESTO",
             "CANC": "CANCELADO",
             "ABD": "SUSPENDIDO",
+            "SUSP": "SUSPENDIDO",
+            "INT": "INTERRUMPIDO",
+            "AWD": "FINALIZADO (DECISIÓN TÉCNICA)",
+            "WO": "FINALIZADO (WALKOVER)",
         }
         return status_map.get(short_status.upper(), "PROGRAMADO")
