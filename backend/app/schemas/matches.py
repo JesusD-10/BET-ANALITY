@@ -125,6 +125,8 @@ class MatchAnalysisResponse(BaseModel):
     injuries: list[InjuryItem] = []
     lineups: LineupsSummary | None = None
     h2h_matches: list[H2HMatchItem] = []
+    home_recent_matches: list[H2HMatchItem] = Field(default_factory=list)
+    away_recent_matches: list[H2HMatchItem] = Field(default_factory=list)
     tactical_summary: str | None = None
     injuries_impact: str | None = None
     referee_impact: str | None = None

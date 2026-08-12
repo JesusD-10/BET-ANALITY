@@ -87,6 +87,7 @@ def test_get_fixture_uses_individual_lookup_and_shared_mapping(mock_get):
     assert fixture.home_team_id == "10"
     assert fixture.away_team_id == "12"
     assert fixture.source_provider == "api-football"
+    assert fixture.odds_available is False
     assert fixture.source_url == "https://v3.football.api-sports.io/fixtures?id=1001"
     assert mock_get.call_args.kwargs["params"] == {"id": "1001"}
 

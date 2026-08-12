@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { use, useEffect, useRef, useState } from "react";
+import { use, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   ArrowLeft,
   CircleAlert,
@@ -28,6 +28,19 @@ import {
   type Analysis,
 } from "../../lib/api";
 
+type DetailTab = "summary" | "combinations" | "dream" | "injuries" | "lineups" | "h2h" | "assistant";
+type H2HTab = "meetings" | "home" | "away";
+
+const detailTabs: Array<{ id: DetailTab; label: string }> = [
+  { id: "summary", label: "Resumen / Apuestas" },
+  { id: "combinations", label: "Combinadas" },
+  { id: "dream", label: "Soñadora" },
+  { id: "injuries", label: "Bajas" },
+  { id: "lineups", label: "Alineaciones" },
+  { id: "h2h", label: "H2H" },
+  { id: "assistant", label: "Asistente" },
+];
+
 export default function MatchDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -37,6 +50,8 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
   const [error, setError] = useState("");
   const [loadingAnalysis, setLoadingAnalysis] = useState(true);
   const [retryVersion, setRetryVersion] = useState(0);
+  const [activeTab, setActiveTab] = useState<DetailTab>("summary");
+  const [activeH2HTab, setActiveH2HTab] = useState<H2HTab>("meetings");
   const assistantControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -49,6 +64,8 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
     setAnswer("");
     setLoadingAnswer(false);
     setLoadingAnalysis(true);
+    setActiveTab("summary");
+    setActiveH2HTab("meetings");
 
     getAnalysis(id, controller.signal)
       .then((result) => {
@@ -115,6 +132,21 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
     }
   }
 
+  function selectAdjacentTab(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % detailTabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + detailTabs.length) % detailTabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = detailTabs.length - 1;
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    setActiveTab(detailTabs[nextIndex].id);
+    event.currentTarget.parentElement
+      ?.querySelectorAll<HTMLButtonElement>("[role='tab']")
+      [nextIndex]?.focus();
+  }
+
   if (error)
     return (
       <AppShell>
@@ -135,7 +167,34 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       </AppShell>
     );
 
-  const { match, referee_info, injuries, lineups, h2h_matches, markets, combinations = [], dream_picks = [], notes } = analysis;
+  const {
+    match,
+    referee_info,
+    injuries,
+    lineups,
+    h2h_matches,
+    home_recent_matches = [],
+    away_recent_matches = [],
+    markets,
+    combinations = [],
+    dream_picks = [],
+    notes,
+  } = analysis;
+  const selectedHistory = activeH2HTab === "meetings"
+    ? h2h_matches
+    : activeH2HTab === "home"
+      ? home_recent_matches
+      : away_recent_matches;
+  const historyEmptyMessage = activeH2HTab === "meetings"
+    ? "Sin registro de enfrentamientos directos recientes."
+    : activeH2HTab === "home"
+      ? `Todavía no hay últimos partidos disponibles de ${match.home_team}.`
+      : `Todavía no hay últimos partidos disponibles de ${match.away_team}.`;
+  const h2hTabs: Array<{ id: H2HTab; label: string }> = [
+    { id: "meetings", label: "Enfrentamientos" },
+    { id: "home", label: `Últimos 5 ${match.home_team}` },
+    { id: "away", label: `Últimos 5 ${match.away_team}` },
+  ];
 
   return (
     <AppShell>
@@ -145,16 +204,33 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
 
       <MatchHero match={match} modelVersion={analysis.model_version} />
 
-      <nav className="detail-tabs">
-        <a href="#resumen">Pronósticos & Mercados</a>
-        <a href="#combinadas">Combinadas</a>
-        <a href="#sonadora-del-partido">Soñadoras</a>
-        <a href="#lesionados">Lesionados & Sancionados</a>
-        <a href="#alineaciones">Alineaciones</a>
-        <a href="#h2h">Historial H2H</a>
-        <a href="#asistente">Asistente OpenAI</a>
-      </nav>
+      <div className="detail-tabs" role="tablist" aria-label="Secciones del análisis del partido">
+        {detailTabs.map((tab, index) => (
+          <button
+            className={activeTab === tab.id ? "detail-tab active" : "detail-tab"}
+            id={`detail-tab-${tab.id}`}
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            aria-controls={`detail-panel-${tab.id}`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(event) => selectAdjacentTab(event, index)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
+      {activeTab === "summary" && (
+      <section
+        className="detail-tab-panel"
+        id="detail-panel-summary"
+        role="tabpanel"
+        aria-labelledby="detail-tab-summary"
+        tabIndex={0}
+      >
       {/* DETALLES DE ÁRBITRO Y CONTEXTO RÁPIDO */}
       <div className="match-context-cards" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "1rem", marginBottom: "2rem" }}>
         {referee_info && (
@@ -188,7 +264,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       </div>
 
       {/* MERCADOS DE APUESTAS Y PRONÓSTICOS */}
-      <section className="detail-grid" id="resumen">
+      <div className="detail-grid">
         <div>
           <div className="section-heading">
             <div>
@@ -229,18 +305,6 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
             ))}
           </div>
 
-          <section className="match-opportunities" id="combinadas">
-            <div className="section-heading compact-heading">
-              <div>
-                <p className="section-kicker">BET BUILDER · PROBABILIDAD CONJUNTA AJUSTADA</p>
-                <h2>Combinadas de alta cobertura</h2>
-              </div>
-            </div>
-            <p className="opportunity-intro">Ideas como un gol mínimo más tres tarjetas, calibradas como un único evento y con el riesgo de correlación visible.</p>
-            {combinations.length ? <div className="combination-grid">
-              {combinations.map((combination) => <CombinationCard item={combination} key={combination.id} />)}
-            </div> : <div className="empty-state">Todavía no hay combinadas calculadas para este partido.</div>}
-          </section>
         </div>
 
         <aside className="detail-aside" id="contexto">
@@ -270,24 +334,56 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
             </span>
           ))}
         </aside>
+      </div>
       </section>
+      )}
 
-      <section className="match-dream-section" id="sonadora-del-partido">
+      {activeTab === "combinations" && (
+      <section
+        className="detail-tab-panel"
+        id="detail-panel-combinations"
+        role="tabpanel"
+        aria-labelledby="detail-tab-combinations"
+        tabIndex={0}
+      >
+        <div className="section-heading compact-heading">
+          <div>
+            <p className="section-kicker">BET BUILDER · PROBABILIDAD CONJUNTA AJUSTADA</p>
+            <h2>Combinadas de alta cobertura</h2>
+          </div>
+        </div>
+        <p className="opportunity-intro">Ideas como un gol mínimo más tres tarjetas, calibradas como un único evento y con el riesgo de correlación visible.</p>
+        {combinations.length ? <div className="combination-grid">
+          {combinations.map((combination) => <CombinationCard item={combination} key={combination.id} />)}
+        </div> : <div className="empty-state">Todavía no hay combinadas calculadas para este partido.</div>}
+      </section>
+      )}
+
+      {activeTab === "dream" && (
+      <section
+        className="detail-tab-panel match-dream-section"
+        id="detail-panel-dream"
+        role="tabpanel"
+        aria-labelledby="detail-tab-dream"
+        tabIndex={0}
+      >
         <div className="section-heading">
           <div>
-            <p className="section-kicker">SOÑADORAS · PROBABILIDAD MODELADA MÍNIMA 30%</p>
+            <p className="section-kicker">SOÑADORAS · SELECCIÓN O COMBINADA</p>
             <h2>Jugadas de mayor cuota para este partido</h2>
           </div>
           <Sparkles size={22} />
         </div>
-        <p className="opportunity-intro">Cada selección apunta a una cuota justa de referencia igual o superior a 3.00. Son ideas de alta varianza, no apuestas seguras.</p>
+        <p className="opportunity-intro">La cuota 3.00 corresponde a la jugada completa: puede ser una selección individual o una combinada de 2–3 condiciones. Son ideas de alta varianza, no apuestas seguras.</p>
         {dream_picks.length ? <div className="combination-grid dream-combination-grid">
           {dream_picks.map((dream) => <CombinationCard item={dream} dream key={dream.id} />)}
         </div> : <div className="empty-state">Todavía no hay Soñadoras calculadas para este partido.</div>}
       </section>
+      )}
 
       {/* SECCIÓN DE JUGADORES LESIONADOS O SANCIONADOS */}
-      <section id="lesionados" style={{ marginTop: "2.5rem", background: "var(--card-bg, rgba(255,255,255,0.03))", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "14px", padding: "1.5rem" }}>
+      {activeTab === "injuries" && (
+      <section className="detail-tab-panel detail-data-panel" id="detail-panel-injuries" role="tabpanel" aria-labelledby="detail-tab-injuries" tabIndex={0}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "1rem", color: "#ef4444" }}>
           <UserX size={22} />
           <h2 style={{ margin: 0, fontSize: "1.4rem" }}>Jugadores Lesionados & Sancionados</h2>
@@ -306,9 +402,11 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
           </div>
         )}
       </section>
+      )}
 
       {/* SECCIÓN DE ALINEACIONES */}
-      <section id="alineaciones" style={{ marginTop: "2rem", background: "var(--card-bg, rgba(255,255,255,0.03))", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "14px", padding: "1.5rem" }}>
+      {activeTab === "lineups" && (
+      <section className="detail-tab-panel detail-data-panel" id="detail-panel-lineups" role="tabpanel" aria-labelledby="detail-tab-lineups" tabIndex={0}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "1rem", color: "#10b981" }}>
           <Users size={22} />
           <h2 style={{ margin: 0, fontSize: "1.4rem" }}>
@@ -352,34 +450,76 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
           <p style={{ opacity: 0.8 }}>Las alineaciones se confirmarán aproximadamente 60 minutos antes del inicio del encuentro.</p>
         )}
       </section>
+      )}
 
       {/* HISTORIAL DIRECTO H2H */}
-      <section id="h2h" style={{ marginTop: "2rem", background: "var(--card-bg, rgba(255,255,255,0.03))", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "14px", padding: "1.5rem" }}>
+      {activeTab === "h2h" && (
+      <section className="detail-tab-panel detail-data-panel" id="detail-panel-h2h" role="tabpanel" aria-labelledby="detail-tab-h2h" tabIndex={0}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "1rem", color: "#a855f7" }}>
           <History size={22} />
-          <h2 style={{ margin: 0, fontSize: "1.4rem" }}>Historial de Enfrentamientos Directos (H2H)</h2>
+          <h2 style={{ margin: 0, fontSize: "1.4rem" }}>Historial y forma reciente</h2>
         </div>
-        {h2h_matches.length === 0 ? (
-          <p style={{ opacity: 0.8 }}>Sin registro de encuentros directos recientes.</p>
+
+        <div className="h2h-subtabs" role="tablist" aria-label="Vistas del historial del partido">
+          {h2hTabs.map((tab, index) => (
+            <button
+              className={activeH2HTab === tab.id ? "h2h-subtab active" : "h2h-subtab"}
+              id={`h2h-tab-${tab.id}`}
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activeH2HTab === tab.id}
+              aria-controls={`h2h-panel-${tab.id}`}
+              tabIndex={activeH2HTab === tab.id ? 0 : -1}
+              onClick={() => setActiveH2HTab(tab.id)}
+              onKeyDown={(event) => {
+                let nextIndex: number | null = null;
+                if (event.key === "ArrowRight") nextIndex = (index + 1) % h2hTabs.length;
+                if (event.key === "ArrowLeft") nextIndex = (index - 1 + h2hTabs.length) % h2hTabs.length;
+                if (event.key === "Home") nextIndex = 0;
+                if (event.key === "End") nextIndex = h2hTabs.length - 1;
+                if (nextIndex === null) return;
+                event.preventDefault();
+                setActiveH2HTab(h2hTabs[nextIndex].id);
+                event.currentTarget.parentElement
+                  ?.querySelectorAll<HTMLButtonElement>("[role='tab']")
+                  [nextIndex]?.focus();
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div
+          className="history-tab-panel"
+          id={`h2h-panel-${activeH2HTab}`}
+          role="tabpanel"
+          aria-labelledby={`h2h-tab-${activeH2HTab}`}
+          tabIndex={0}
+        >
+        {selectedHistory.length === 0 ? (
+          <div className="empty-state">{historyEmptyMessage}</div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-            {h2h_matches.map((h2h, idx) => (
-              <div key={idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(0,0,0,0.2)", padding: "0.75rem 1rem", borderRadius: "8px" }}>
+          <div className="history-match-list">
+            {selectedHistory.slice(0, activeH2HTab === "meetings" ? 10 : 5).map((historyMatch, idx) => (
+              <div className="history-match-row" key={`${historyMatch.date}-${historyMatch.home_team}-${historyMatch.away_team}-${idx}`}>
                 <span>
-                  <small style={{ opacity: 0.6, marginRight: "0.6rem" }}>{h2h.date}</small>
-                  <b>{h2h.home_team}</b> vs <b>{h2h.away_team}</b>
+                  <small>{historyMatch.date}</small>
+                  <b>{historyMatch.home_team}</b> vs <b>{historyMatch.away_team}</b>
                 </span>
-                <span style={{ fontWeight: 700, background: "rgba(255,255,255,0.1)", padding: "0.2rem 0.6rem", borderRadius: "6px" }}>
-                  {h2h.score}
-                </span>
+                <strong>{historyMatch.score}</strong>
               </div>
             ))}
           </div>
         )}
+        </div>
       </section>
+      )}
 
       {/* ASISTENTE OPENAI INTERACTIVO */}
-      <section className="assistant-section" id="asistente">
+      {activeTab === "assistant" && (
+      <section className="detail-tab-panel assistant-section" id="detail-panel-assistant" role="tabpanel" aria-labelledby="detail-tab-assistant" tabIndex={0}>
         <div>
           <p className="section-kicker">OPENAI · ANÁLISIS EN TIEMPO REAL</p>
           <h2>Consulta al Asistente IA del Partido</h2>
@@ -402,6 +542,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
           )}
         </div>
       </section>
+      )}
 
       <ResponsibleNote />
     </AppShell>

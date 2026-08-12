@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 import logging
@@ -131,48 +131,65 @@ class FootballDataProvider:
         clean_id = match_id.replace("football-data-", "")
         endpoint = f"{self.base_url}/matches/{clean_id}/head2head"
         try:
-            res = httpx.get(endpoint, params={"limit": limit}, headers=self._headers(), timeout=self.timeout)
+            bounded_limit = max(1, min(limit, 10))
+            res = httpx.get(endpoint, params={"limit": bounded_limit}, headers=self._headers(), timeout=self.timeout)
             res.raise_for_status()
-            data = res.json()
-            matches = data.get("matches", [])
-            results = []
-            for m in matches:
-                home = m.get("homeTeam", {}).get("name", "Local")
-                away = m.get("awayTeam", {}).get("name", "Visitante")
-                score = m.get("score", {}).get("fullTime", {})
-                home_g = score.get("home", 0) if score.get("home") is not None else 0
-                away_g = score.get("away", 0) if score.get("away") is not None else 0
-
-                winner = "Empate"
-                if home_g > away_g:
-                    winner = home
-                elif away_g > home_g:
-                    winner = away
-
-                results.append(
-                    H2HMatchItem(
-                        date=m.get("utcDate", "")[:10],
-                        competition=m.get("competition", {}).get("name", "Liga"),
-                        home_team=home,
-                        away_team=away,
-                        score=f"{home_g} - {away_g}",
-                        winner=winner,
-                    )
-                )
-            return results
+            return self.normalize_history(res.json().get("matches", []), bounded_limit)
         except Exception as exc:
             logger.warning("Fallo al obtener H2H en football-data: %s", exc)
             return []
 
-    def get_team_last_matches(self, team_id: str, limit: int = 10) -> list[dict]:
+    def get_team_last_matches(self, team_id: str, limit: int = 5) -> list[dict]:
         endpoint = f"{self.base_url}/teams/{team_id}/matches"
         try:
-            res = httpx.get(endpoint, params={"status": "FINISHED", "limit": limit}, headers=self._headers(), timeout=self.timeout)
+            bounded_limit = max(1, min(limit, 5))
+            res = httpx.get(
+                endpoint,
+                params={"status": "FINISHED", "limit": bounded_limit},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
             res.raise_for_status()
-            return res.json().get("matches", [])
+            raw_items = res.json().get("matches", [])
+            return sorted(raw_items, key=lambda item: str(item.get("utcDate") or ""), reverse=True)[:bounded_limit]
         except Exception as exc:
             logger.warning("Fallo al obtener partidos del equipo %s en football-data: %s", team_id, exc)
             return []
+
+    @staticmethod
+    def _history_item(item: dict) -> H2HMatchItem | None:
+        """Normalize real provider history without substituting absent fields."""
+        raw_date = item.get("utcDate")
+        competition = (item.get("competition") or {}).get("name")
+        home = (item.get("homeTeam") or {}).get("name")
+        away = (item.get("awayTeam") or {}).get("name")
+        score = (item.get("score") or {}).get("fullTime") or {}
+        home_goals = score.get("home")
+        away_goals = score.get("away")
+        if not raw_date or not competition or not home or not away or home_goals is None or away_goals is None:
+            return None
+
+        if home_goals > away_goals:
+            winner = home
+        elif away_goals > home_goals:
+            winner = away
+        else:
+            winner = "Empate"
+
+        return H2HMatchItem(
+            date=str(raw_date)[:10],
+            competition=str(competition),
+            home_team=str(home),
+            away_team=str(away),
+            score=f"{home_goals} - {away_goals}",
+            winner=winner,
+        )
+
+    @classmethod
+    def normalize_history(cls, items: list[dict], limit: int = 5) -> list[H2HMatchItem]:
+        normalized = [match for item in items if (match := cls._history_item(item)) is not None]
+        normalized.sort(key=lambda match: match.date, reverse=True)
+        return normalized[: max(0, limit)]
 
     def _to_match(self, item: dict, endpoint: str) -> MatchSummary:
         competition = item.get("competition") or {}
@@ -438,6 +455,70 @@ def _future_value(future: Future | None, default):
         return default
 
 
+def _history_item(
+    match_date: date,
+    competition: str,
+    home_team: str,
+    away_team: str,
+    home_goals: int,
+    away_goals: int,
+) -> H2HMatchItem:
+    if home_goals > away_goals:
+        winner = home_team
+    elif away_goals > home_goals:
+        winner = away_team
+    else:
+        winner = "Empate"
+    return H2HMatchItem(
+        date=match_date.isoformat(),
+        competition=competition,
+        home_team=home_team,
+        away_team=away_team,
+        score=f"{home_goals} - {away_goals}",
+        winner=winner,
+    )
+
+
+def _mock_histories(match: MatchSummary) -> tuple[list[H2HMatchItem], list[H2HMatchItem], list[H2HMatchItem]]:
+    """Build visibly marked sample histories only while the whole application is in demo mode."""
+    anchor = match.kickoff_at.date()
+    competition = f"{match.competition} · demo"
+    h2h_scores = [(2, 1), (1, 1), (0, 2), (3, 1), (1, 0)]
+    h2h: list[H2HMatchItem] = []
+    for index, (first_goals, second_goals) in enumerate(h2h_scores):
+        first_is_home = index % 2 == 0
+        h2h.append(
+            _history_item(
+                anchor - timedelta(days=75 * (index + 1)),
+                competition,
+                match.home_team if first_is_home else match.away_team,
+                match.away_team if first_is_home else match.home_team,
+                first_goals,
+                second_goals,
+            )
+        )
+
+    def team_history(team: str, seed: int) -> list[H2HMatchItem]:
+        score_pairs = [(2, 0), (1, 1), (1, 2), (3, 1), (0, 1)]
+        result: list[H2HMatchItem] = []
+        for index, (team_goals, rival_goals) in enumerate(score_pairs):
+            team_is_home = (index + seed) % 2 == 0
+            rival = f"Rival demo {index + 1}"
+            result.append(
+                _history_item(
+                    anchor - timedelta(days=7 * (index + 1)),
+                    competition,
+                    team if team_is_home else rival,
+                    rival if team_is_home else team,
+                    team_goals if team_is_home else rival_goals,
+                    rival_goals if team_is_home else team_goals,
+                )
+            )
+        return result
+
+    return h2h, team_history(match.home_team, 0), team_history(match.away_team, 1)
+
+
 def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisResponse | None:
     analysis_started_at = time.monotonic()
     cache_key = (match_id, use_openai)
@@ -459,6 +540,8 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
     h2h_matches: list[H2HMatchItem] = []
     home_history: list[dict] = []
     away_history: list[dict] = []
+    home_recent_matches: list[H2HMatchItem] = []
+    away_recent_matches: list[H2HMatchItem] = []
 
     provider = _active_provider()
     if isinstance(provider, APIFootballProvider) and match.id.startswith("api-football-"):
@@ -471,52 +554,43 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
             away_future = None
             if match.home_team_id and match.away_team_id:
                 h2h_future = executor.submit(provider.get_head_to_head, match.home_team_id, match.away_team_id, 10)
-                home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 10)
-                away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 10)
+                home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 5)
+                away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 5)
 
             injuries = _future_value(injuries_future, [])
             lineups = _future_value(lineups_future, None)
             h2h_matches = _future_value(h2h_future, [])
             home_history = _future_value(home_future, [])
             away_history = _future_value(away_future, [])
+            home_recent_matches = provider.normalize_history(home_history, 5)
+            away_recent_matches = provider.normalize_history(away_history, 5)
 
     elif isinstance(provider, FootballDataProvider) and match.id.startswith("football-data-"):
         with ThreadPoolExecutor(max_workers=3) as executor:
             h2h_future = executor.submit(provider.get_head_to_head, match.id, 10)
-            home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 10) if match.home_team_id else None
-            away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 10) if match.away_team_id else None
+            home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 5) if match.home_team_id else None
+            away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 5) if match.away_team_id else None
             h2h_matches = _future_value(h2h_future, [])
             home_history = _future_value(home_future, [])
             away_history = _future_value(away_future, [])
+            home_recent_matches = provider.normalize_history(home_history, 5)
+            away_recent_matches = provider.normalize_history(away_history, 5)
+    if match.source_provider == "mock":
+        mock_h2h, mock_home_history, mock_away_history = _mock_histories(match)
+        if not h2h_matches:
+            h2h_matches = mock_h2h
+        if not home_recent_matches:
+            home_recent_matches = mock_home_history
+        if not away_recent_matches:
+            away_recent_matches = mock_away_history
 
-
-    if not h2h_matches:
-        h2h_matches = [
-            H2HMatchItem(
-                date="2025-11-15",
-                competition=match.competition,
-                home_team=match.home_team,
-                away_team=match.away_team,
-                score="2 - 1",
-                winner=match.home_team,
-            ),
-            H2HMatchItem(
-                date="2025-04-10",
-                competition=match.competition,
-                home_team=match.away_team,
-                away_team=match.home_team,
-                score="1 - 1",
-                winner="Empate",
-            ),
-        ]
-
-    if not injuries and "arsenal" in match.home_team.lower():
+    if match.source_provider == "mock" and not injuries and "arsenal" in match.home_team.lower():
         injuries = [
             InjuryItem(player="Bukayo Saka", team=match.home_team, reason="Molestia muscular en isquiotibiales", status="Duda"),
             InjuryItem(player="Reece James", team=match.away_team, reason="Sanción por acumulación de tarjetas", status="Sancionado"),
         ]
 
-    if match.referee:
+    if match.referee and match.source_provider == "mock":
         ref_hash = sum(ord(c) for c in match.referee)
         y_avg = round(3.4 + (ref_hash % 25) / 10.0, 1)  # Variación entre 3.4 y 5.8
         r_avg = round(0.12 + (ref_hash % 7) / 50.0, 2)
@@ -527,6 +601,11 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
             red_cards_avg=r_avg,
             fouls_per_game=f_avg,
             tendency="Mantiene control riguroso en mediocampo" if y_avg > 4.5 else "Permite fluidez en transiciones",
+        )
+    elif match.referee:
+        referee_info = RefereeInfo(
+            name=match.referee,
+            tendency="Sin métricas arbitrales verificadas",
         )
 
     # Leave enough of the 10-second browser budget for serialization/network.
@@ -542,6 +621,8 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
         away_last_matches=away_history,
         allow_openai=use_openai and openai_has_budget,
     )
+    analysis.home_recent_matches = home_recent_matches[:5]
+    analysis.away_recent_matches = away_recent_matches[:5]
     _cache_set(_analysis_cache, cache_key, analysis)
     return analysis
 

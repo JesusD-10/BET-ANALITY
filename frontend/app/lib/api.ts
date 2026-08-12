@@ -181,6 +181,8 @@ export type Analysis = {
   injuries: Injury[];
   lineups?: LineupsSummary | null;
   h2h_matches: H2HMatch[];
+  home_recent_matches: H2HMatch[];
+  away_recent_matches: H2HMatch[];
   tactical_summary?: string | null;
   injuries_impact?: string | null;
   referee_impact?: string | null;

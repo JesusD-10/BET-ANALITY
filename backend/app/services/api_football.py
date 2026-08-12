@@ -102,7 +102,9 @@ class APIFootballProvider:
             venue=(fixture.get("venue") or {}).get("name"),
             referee=fixture.get("referee"),
             data_quality=0.95,
-            odds_available=True,
+            # Fixtures do not include bookmaker quotes. A future odds provider
+            # can flip this flag only after prices are actually retrieved.
+            odds_available=False,
             status=self._normalize_status(status_short),
             source_provider=self.provider_name,
             source_url=f"{self.base_url}/fixtures?id={fixture_id}",
@@ -126,46 +128,61 @@ class APIFootballProvider:
         res = data.get("response", [])
         return res[0] if res else None
 
-    def get_team_last_matches(self, team_id: str, limit: int = 10) -> list[dict]:
-        data = self._request("fixtures", params={"team": team_id, "last": str(limit)})
-        return data.get("response", [])
+    def get_team_last_matches(self, team_id: str, limit: int = 5) -> list[dict]:
+        """Keep at most five raw fixtures so richer provider statistics remain available to analysis."""
+        bounded_limit = max(1, min(limit, 5))
+        data = self._request("fixtures", params={"team": team_id, "last": str(bounded_limit)})
+        raw_items = data.get("response", [])
+        return sorted(
+            raw_items,
+            key=lambda item: str((item.get("fixture") or {}).get("date") or ""),
+            reverse=True,
+        )[:bounded_limit]
 
     def get_head_to_head(self, team1_id: str, team2_id: str, limit: int = 10) -> list[H2HMatchItem]:
         h2h_param = f"{team1_id}-{team2_id}"
-        data = self._request("fixtures/headtohead", params={"h2h": h2h_param, "last": str(limit)})
-        results = []
-        for item in data.get("response", []):
-            fixture = item.get("fixture", {})
-            league = item.get("league", {})
-            teams = item.get("teams", {})
-            goals = item.get("goals", {})
+        bounded_limit = max(1, min(limit, 10))
+        data = self._request("fixtures/headtohead", params={"h2h": h2h_param, "last": str(bounded_limit)})
+        return self.normalize_history(data.get("response", []), bounded_limit)
 
-            date_raw = fixture.get("date", "")[:10]
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            home_goals = goals.get("home") if goals.get("home") is not None else 0
-            away_goals = goals.get("away") if goals.get("away") is not None else 0
+    @staticmethod
+    def _history_item(item: dict) -> H2HMatchItem | None:
+        """Normalize one real fixture, skipping incomplete records instead of fabricating values."""
+        fixture = item.get("fixture") or {}
+        league = item.get("league") or {}
+        teams = item.get("teams") or {}
+        goals = item.get("goals") or {}
 
-            score_str = f"{home_goals} - {away_goals}"
-            winner = None
-            if home_goals > away_goals:
-                winner = home
-            elif away_goals > home_goals:
-                winner = away
-            else:
-                winner = "Empate"
+        raw_date = fixture.get("date")
+        competition = league.get("name")
+        home = (teams.get("home") or {}).get("name")
+        away = (teams.get("away") or {}).get("name")
+        home_goals = goals.get("home")
+        away_goals = goals.get("away")
+        if not raw_date or not competition or not home or not away or home_goals is None or away_goals is None:
+            return None
 
-            results.append(
-                H2HMatchItem(
-                    date=date_raw,
-                    competition=league.get("name", "Liga"),
-                    home_team=home,
-                    away_team=away,
-                    score=score_str,
-                    winner=winner,
-                )
-            )
-        return results
+        if home_goals > away_goals:
+            winner = home
+        elif away_goals > home_goals:
+            winner = away
+        else:
+            winner = "Empate"
+
+        return H2HMatchItem(
+            date=str(raw_date)[:10],
+            competition=str(competition),
+            home_team=str(home),
+            away_team=str(away),
+            score=f"{home_goals} - {away_goals}",
+            winner=winner,
+        )
+
+    @classmethod
+    def normalize_history(cls, items: list[dict], limit: int = 5) -> list[H2HMatchItem]:
+        normalized = [match for item in items if (match := cls._history_item(item)) is not None]
+        normalized.sort(key=lambda match: match.date, reverse=True)
+        return normalized[: max(0, limit)]
 
     def get_fixture_injuries(self, fixture_id: str) -> list[InjuryItem]:
         clean_id = fixture_id.replace("api-football-", "")

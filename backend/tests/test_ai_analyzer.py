@@ -1,6 +1,16 @@
 from datetime import datetime, timezone
+import json
+from types import SimpleNamespace
+
+import openai
+
+from app.core.config import settings
 from app.schemas.matches import MatchSummary, RefereeInfo, InjuryItem, H2HMatchItem
-from app.services.ai_analyzer import analyze_match_with_ai, _generate_local_fallback_analysis
+from app.services.ai_analyzer import (
+    _available_market_families,
+    _generate_local_fallback_analysis,
+    analyze_match_with_ai,
+)
 
 
 def test_local_fallback_analysis_returns_rich_context():
@@ -30,3 +40,94 @@ def test_local_fallback_analysis_returns_rich_context():
     assert analysis.injuries[0].player == "Courtois"
     assert len(analysis.h2h_matches) == 1
     assert analysis.markets[0].fair_odds > 1.0
+
+
+def test_openai_advanced_market_is_filtered_without_source_statistics(monkeypatch):
+    match = MatchSummary(
+        id="provider-1",
+        competition="Liga",
+        kickoff_at=datetime.now(timezone.utc),
+        home_team="Local",
+        away_team="Visitante",
+        data_quality=0.8,
+        odds_available=False,
+        status="PROGRAMADO",
+    )
+    content = json.dumps(
+        {
+            "markets": [
+                {
+                    "market_key": "TOTAL_CORNERS_OVER_9_5",
+                    "label": "Córners",
+                    "selection": "Más de 9.5",
+                    "probability": 0.55,
+                    "fair_odds": 1.82,
+                    "best_odds": 2.0,
+                    "expected_value": 0.1,
+                    "confidence": "Media",
+                    "data_quality": 0.8,
+                    "factors_for": ["Supuesto no respaldado"],
+                    "risks": ["Sin datos"],
+                },
+                {
+                    "market_key": "TOTAL_GOALS_OVER_2_5",
+                    "label": "Goles",
+                    "selection": "Más de 2.5",
+                    "probability": 0.52,
+                    "fair_odds": 1.92,
+                    "best_odds": 2.05,
+                    "expected_value": 0.066,
+                    "confidence": "Media",
+                    "data_quality": 0.8,
+                    "factors_for": ["Marcadores recientes"],
+                    "risks": ["Varianza"],
+                },
+            ]
+        }
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+    )
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_: response)
+        )
+    )
+    monkeypatch.setattr(openai, "OpenAI", lambda **_: fake_client)
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+
+    analysis = analyze_match_with_ai(match)
+
+    assert [market.market_key for market in analysis.markets] == ["TOTAL_GOALS_OVER_2_5"]
+    assert analysis.markets[0].best_odds is None
+    assert analysis.markets[0].expected_value is None
+
+
+def test_advanced_families_activate_only_from_explicit_statistics():
+    families = _available_market_families(
+        None,
+        [
+            {
+                "statistics": {"corners": 8, "shots": 14},
+                "players": [{"player": "Delantero", "shots": 3, "goals": 1}],
+            }
+        ],
+        [],
+    )
+
+    assert {"corners", "team_shots", "player_shots", "player_goals"}.issubset(families)
+
+
+def test_normalized_recent_matches_are_accepted_without_enabling_advanced_markets():
+    recent = H2HMatchItem(
+        date="2026-08-10",
+        competition="Liga",
+        home_team="Local",
+        away_team="Rival",
+        score="2 - 1",
+        winner="Local",
+    )
+
+    families = _available_market_families(None, [recent], [])
+
+    assert families == {"result", "goals"}

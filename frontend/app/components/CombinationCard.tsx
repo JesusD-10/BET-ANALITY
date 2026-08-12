@@ -3,6 +3,11 @@ import type { Combination } from "../lib/api";
 
 export default function CombinationCard({ item, dream = false }: { item: Combination; dream?: boolean }) {
   const displayedOdds = item.best_odds ?? item.fair_odds;
+  const oddsLabel = item.best_odds
+    ? "mejor cuota total"
+    : item.legs.length > 1
+      ? "cuota combinada ref."
+      : "cuota justa ref.";
 
   return (
     <article className={`combination-card ${dream ? "combination-card-dream" : ""}`}>
@@ -20,7 +25,7 @@ export default function CombinationCard({ item, dream = false }: { item: Combina
         ))}
       </ol>
       <div className="combination-stats">
-        <span><b>{displayedOdds.toFixed(2)}</b>{item.best_odds ? "mejor cuota" : "cuota justa ref."}</span>
+        <span><b>{displayedOdds.toFixed(2)}</b>{oddsLabel}</span>
         <span><b>{item.confidence}</b>confianza</span>
         <span><b>{Math.round(item.data_quality * 100)}%</b>calidad</span>
       </div>

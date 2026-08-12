@@ -22,7 +22,7 @@ export default function DreamsPage() {
   return (
     <AppShell>
       <PageHeader eyebrow="OPORTUNIDADES DEL DÍA · PROBABILIDAD MÍNIMA 30%" title="Soñadoras" action={<Link className="outline-link" href="/recomendaciones">Ver simples <ArrowUpRight size={15} /></Link>} />
-      <div className="dream-banner"><Sparkles size={22} /><div><strong>Cuota alta, evidencia visible</strong><p>Combinadas con cuota justa de referencia desde 3.00. Son selecciones de alta varianza y no representan una garantía.</p></div></div>
+      <div className="dream-banner"><Sparkles size={22} /><div><strong>Cuota total alta, evidencia visible</strong><p>Una Soñadora puede ser una selección o una combinada de 2–3 condiciones cuya cuota total de referencia alcance 3.00. Es una jugada de alta varianza, no una garantía.</p></div></div>
       {loading ? (
         <div className="empty-state">Calculando las Soñadoras de la agenda...</div>
       ) : error ? (

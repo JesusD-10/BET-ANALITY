@@ -7,6 +7,7 @@ import type { Recommendation } from "../lib/api";
 export default function DreamRecommendationCard({ item }: { item: Recommendation }) {
   const displayedOdds = item.best_odds ?? item.fair_odds;
   const legs = item.legs ?? [];
+  const isCombination = legs.length > 1;
   const dataQuality = item.data_quality ?? 0.7;
 
   return (
@@ -18,12 +19,12 @@ export default function DreamRecommendationCard({ item }: { item: Recommendation
         </div>
         <small>{item.match_label}</small>
       </div>
-      <span className="dream-pill">ALTA VARIANZA</span>
+      <span className="dream-pill">{isCombination ? `COMBINADA · ${legs.length} CONDICIONES` : "SELECCIÓN · ALTA VARIANZA"}</span>
       <h2>{item.selection}</h2>
       <p>{item.market}{legs.length ? ` · ${legs.length} condiciones` : ""}</p>
       <div className="recommendation-stats">
         <span><b>{Math.round(item.probability * 100)}%</b>prob. modelada</span>
-        <span><b>{displayedOdds.toFixed(2)}</b>cuota ref.</span>
+        <span><b>{displayedOdds.toFixed(2)}</b>{isCombination ? "cuota total ref." : "cuota ref."}</span>
         <span><b>{Math.round(dataQuality * 100)}%</b>calidad</span>
       </div>
       <div className="daily-dream-legs">
