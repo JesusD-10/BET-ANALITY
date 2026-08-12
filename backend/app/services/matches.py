@@ -301,7 +301,12 @@ def _index_matches(matches: list[MatchSummary]) -> None:
 
 def _active_provider():
     provider_setting = settings.sports_data_provider.casefold()
-    if provider_setting in {"api-football", "apifootball"} and settings.api_football_key:
+    if provider_setting in {
+        "api-football",
+        "apifootball",
+        "api-sports",
+        "apisports",
+    } and settings.api_football_key:
         return api_football_provider
     if provider_setting in {"football-data", "footballdata"} and settings.football_data_api_token:
         return football_data_provider
@@ -548,7 +553,12 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
         fixture_id = match.external_id or match.id.replace("api-football-", "")
         with ThreadPoolExecutor(max_workers=5) as executor:
             injuries_future = executor.submit(provider.get_fixture_injuries, fixture_id)
-            lineups_future = executor.submit(provider.get_fixture_lineups, fixture_id)
+            lineups_future = executor.submit(
+                provider.get_fixture_lineups,
+                fixture_id,
+                match.home_team_id,
+                match.away_team_id,
+            )
             h2h_future = None
             home_future = None
             away_future = None

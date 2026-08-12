@@ -7,10 +7,21 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings, settings
 from app.main import app
-from app.schemas.matches import MarketAnalysis, MatchSummary, RefereeInfo
+from app.schemas.matches import (
+    MarketAnalysis,
+    MatchAnalysisResponse,
+    MatchSummary,
+    RefereeInfo,
+)
 from app.services.matches import _analysis_cache, _fixture_cache
 from app.services.ai_analyzer import analyze_match_with_ai
-from app.services.opportunities import MARKET_TAXONOMY, build_combinations, build_dream_picks
+from app.services.opportunities import (
+    MARKET_TAXONOMY,
+    build_combinations,
+    build_dream_picks,
+    enrich_analysis_with_opportunities,
+    market_family,
+)
 
 
 client = TestClient(app)
@@ -29,9 +40,32 @@ def _match() -> MatchSummary:
     )
 
 
+def _advanced_market(
+    market_key: str,
+    label: str,
+    selection: str,
+    probability: float,
+    *,
+    data_quality: float = 0.88,
+) -> MarketAnalysis:
+    return MarketAnalysis(
+        market_key=market_key,
+        label=label,
+        selection=selection,
+        probability=probability,
+        fair_odds=round(1 / probability, 2),
+        best_odds=2.10,
+        expected_value=0.04,
+        confidence="Media-alta",
+        data_quality=data_quality,
+        factors_for=[f"Datos verificados para {label.lower()}"],
+        risks=[f"Varianza del mercado de {label.lower()}"],
+    )
+
+
 def test_external_timeouts_stay_inside_interactive_budget() -> None:
     assert settings.openai_timeout_seconds <= 5
-    assert settings.api_football_timeout_seconds <= 2
+    assert settings.api_football_timeout_seconds <= 3
     assert settings.football_data_timeout_seconds <= 2
     assert settings.openai_max_retries == 0
 
@@ -48,7 +82,7 @@ def test_settings_clamp_slow_values_and_ignore_placeholders() -> None:
     )
 
     assert configured.openai_timeout_seconds == 5
-    assert configured.api_football_timeout_seconds == 2
+    assert configured.api_football_timeout_seconds == 3
     assert configured.football_data_timeout_seconds == 2
     assert configured.openai_max_retries == 0
     assert configured.openai_api_key == ""
@@ -145,6 +179,121 @@ def test_advanced_market_taxonomy_is_ready_but_not_fabricated() -> None:
     dreams_without_advanced_data = build_dream_picks(_match(), None)
     keys = {leg.market_key for dream in dreams_without_advanced_data for leg in dream.legs}
     assert not any("CORNER" in key or "SHOT" in key or "GOALSCORER" in key for key in keys)
+
+
+def test_advanced_markets_form_one_adjusted_builder_from_distinct_families() -> None:
+    markets = [
+        _advanced_market(
+            "TOTAL_CORNERS_OVER_8_5",
+            "Total de córners",
+            "Más de 8.5 córners",
+            0.62,
+            data_quality=0.91,
+        ),
+        _advanced_market(
+            "PLAYER_SHOTS_ON_TARGET_OVER_0_5",
+            "Remates al arco de jugador",
+            "Delantero: más de 0.5 remates al arco",
+            0.58,
+            data_quality=0.87,
+        ),
+    ]
+
+    combinations = build_combinations(_match(), None, markets)
+    advanced = [item for item in combinations if item.kind == "advanced-builder"]
+
+    assert len(advanced) == 1
+    builder = advanced[0]
+    assert len(builder.legs) == 2
+    assert {
+        market_family(builder.legs[0].market_key),
+        market_family(builder.legs[1].market_key),
+    } == {"corners", "player_shots_on_target"}
+    assert builder.probability == round(0.62 * 0.58 * 0.90, 4)
+    assert builder.fair_odds == round(1 / builder.probability, 2)
+    assert builder.best_odds is None
+    assert builder.expected_value is None
+    assert "0.90" in builder.correlation_note
+    assert "independencia" in builder.correlation_note
+
+
+def test_advanced_builder_rejects_low_probability_or_same_family_legs() -> None:
+    same_family = [
+        _advanced_market("TOTAL_CORNERS_OVER_8_5", "Córners", "Más de 8.5", 0.70),
+        _advanced_market("TEAM_CORNERS_HOME_OVER_3_5", "Córners local", "Más de 3.5", 0.66),
+    ]
+    low_probability = [
+        _advanced_market("TOTAL_CARDS_OVER_3_5", "Tarjetas", "Más de 3.5", 0.54),
+        _advanced_market("TEAM_SHOTS_HOME_OVER_9_5", "Remates", "Más de 9.5", 0.80),
+    ]
+
+    assert not any(
+        item.kind == "advanced-builder"
+        for item in build_combinations(_match(), None, same_family)
+    )
+    assert not any(
+        item.kind == "advanced-builder"
+        for item in build_combinations(_match(), None, low_probability)
+    )
+
+
+def test_eligible_advanced_builder_has_priority_in_dreams_and_keeps_limit() -> None:
+    markets = [
+        _advanced_market("TOTAL_CORNERS_OVER_8_5", "Córners", "Más de 8.5", 0.62),
+        _advanced_market(
+            "PLAYER_SHOTS_OVER_1_5",
+            "Remates de jugador",
+            "Delantero: más de 1.5 remates",
+            0.58,
+        ),
+    ]
+
+    dreams = build_dream_picks(
+        _match(),
+        RefereeInfo(name="Árbitro", yellow_cards_avg=4.8),
+        markets,
+    )
+
+    assert len(dreams) == 2
+    assert dreams[0].kind == "advanced-builder"
+    assert dreams[0].probability >= 0.30
+    assert dreams[0].fair_odds >= 3.0
+    assert dreams[0].best_odds is None
+    assert dreams[0].expected_value is None
+
+
+def test_advanced_dream_requires_probability_and_fair_odds_thresholds() -> None:
+    below_probability = [
+        _advanced_market("TOTAL_CARDS_OVER_3_5", "Tarjetas", "Más de 3.5", 0.55),
+        _advanced_market("TOTAL_CORNERS_OVER_8_5", "Córners", "Más de 8.5", 0.55),
+    ]
+    below_reference_odds = [
+        _advanced_market("TOTAL_CARDS_OVER_3_5", "Tarjetas", "Más de 3.5", 0.68),
+        _advanced_market("TOTAL_CORNERS_OVER_8_5", "Córners", "Más de 8.5", 0.65),
+    ]
+
+    for markets in (below_probability, below_reference_odds):
+        dreams = build_dream_picks(_match(), None, markets)
+        assert not any(item.kind == "advanced-builder" for item in dreams)
+
+
+def test_enrichment_passes_gated_markets_to_advanced_builders() -> None:
+    markets = [
+        _advanced_market("TOTAL_CARDS_OVER_3_5", "Tarjetas", "Más de 3.5", 0.62),
+        _advanced_market("TEAM_SHOTS_HOME_OVER_9_5", "Remates", "Más de 9.5", 0.58),
+    ]
+    analysis = MatchAnalysisResponse(
+        match=_match(),
+        model_version="test-model",
+        updated_at=datetime.now(timezone.utc),
+        markets=markets,
+        notes=[],
+    )
+
+    enriched = enrich_analysis_with_opportunities(analysis)
+
+    assert any(item.kind == "advanced-builder" for item in enriched.combinations)
+    assert any(item.kind == "advanced-builder" for item in enriched.dream_picks)
 
 
 def test_cards_are_omitted_from_generated_builders_without_referee_metrics() -> None:

@@ -71,15 +71,26 @@ OPENAI_MODEL=gpt-5-mini
 OPENAI_TIMEOUT_SECONDS=5
 OPENAI_MAX_RETRIES=0
 
-# Proveedor de Datos Deportivos (football-data o api-football)
-SPORTS_DATA_PROVIDER=football-data
-FOOTBALL_DATA_API_TOKEN=tu_football_data_token_aqui
+# API-SPORTS / API-Football (conexión directa, no RapidAPI)
+# También se acepta el alias api-sports
+SPORTS_DATA_PROVIDER=api-football
+API_FOOTBALL_KEY=tu_api_sports_key_aqui
+API_FOOTBALL_BASE_URL=https://v3.football.api-sports.io
+API_FOOTBALL_IS_RAPIDAPI=false
+API_FOOTBALL_TIMEOUT_SECONDS=3
+
+# Alternativa: Football-Data.org
+FOOTBALL_DATA_API_TOKEN=
 FOOTBALL_DATA_BASE_URL=https://api.football-data.org/v4
 FOOTBALL_DATA_TIMEOUT_SECONDS=2
-API_FOOTBALL_TIMEOUT_SECONDS=2
 ```
 
 > **Nota**: Si no se proporcionan las claves de API, el sistema funcionará automáticamente con un proveedor de datos demostrativos y un motor estadístico local sin interrumpir la interfaz.
+
+En Render, agrega estas variables únicamente al servicio **backend** desde
+`Environment`. La clave debe guardarse como secreto en `API_FOOTBALL_KEY`; nunca
+debe ponerse en el frontend, en una variable `NEXT_PUBLIC_*` ni confirmarse en Git.
+Después de guardar las variables, ejecuta un redeploy del backend.
 
 Todas las solicitudes del navegador se cancelan a los 10 segundos. Las llamadas del backend usan presupuestos menores y fallback local para evitar esperas prolongadas.
 

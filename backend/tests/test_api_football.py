@@ -174,3 +174,250 @@ def test_get_fixture_injuries(mock_get):
     assert len(injuries) == 1
     assert injuries[0].player == "Radamel Falcao"
     assert injuries[0].team == "Millonarios"
+
+
+def test_get_fixture_lineups_uses_exact_api_sports_endpoint(monkeypatch):
+    calls = []
+
+    def fake_request(endpoint, params=None):
+        calls.append((endpoint, params))
+        return {
+            "response": [
+                {
+                    "team": {"id": 10, "name": "Millonarios"},
+                    "formation": "4-2-3-1",
+                    "coach": {"name": "Entrenador local"},
+                    "startXI": [
+                        {"player": {"id": 7, "name": "Titular", "number": 9, "pos": "F", "grid": "1:1"}}
+                    ],
+                    "substitutes": [],
+                },
+                {
+                    "team": {"id": 12, "name": "Santa Fe"},
+                    "formation": "4-3-3",
+                    "coach": {"name": "Entrenador visitante"},
+                    "startXI": [],
+                    "substitutes": [],
+                },
+            ]
+        }
+
+    provider = APIFootballProvider(key="dummy_key")
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    lineups = provider.get_fixture_lineups("api-football-1001")
+
+    assert calls == [("fixtures/lineups", {"fixture": "1001"})]
+    assert lineups.confirmed is True
+    assert lineups.home is not None
+    assert lineups.home.team_name == "Millonarios"
+    assert lineups.home.start_xi[0].name == "Titular"
+    assert lineups.away is not None
+    assert lineups.away.team_name == "Santa Fe"
+
+
+def test_get_fixture_lineups_uses_team_ids_when_provider_order_is_reversed(monkeypatch):
+    provider = APIFootballProvider(key="dummy_key")
+    monkeypatch.setattr(
+        provider,
+        "_request",
+        lambda endpoint, params=None: {
+            "response": [
+                {"team": {"id": 12, "name": "Visitante"}, "startXI": [], "substitutes": []},
+                {"team": {"id": 10, "name": "Local"}, "startXI": [], "substitutes": []},
+            ]
+        },
+    )
+
+    lineups = provider.get_fixture_lineups("1001", home_team_id="10", away_team_id="12")
+
+    assert lineups.home is not None
+    assert lineups.home.team_name == "Local"
+    assert lineups.away is not None
+    assert lineups.away.team_name == "Visitante"
+
+
+def test_recent_matches_use_one_batch_and_normalize_statistics(monkeypatch):
+    calls = []
+    base_items = [
+        {
+            "fixture": {"id": 1001, "date": "2026-08-01T20:00:00+00:00"},
+            "league": {"name": "Liga", "base_only": True},
+            "teams": {"home": {"name": "A"}, "away": {"name": "B"}},
+            "goals": {"home": 1, "away": 0},
+        },
+        {
+            "fixture": {"id": 1002, "date": "2026-08-03T20:00:00+00:00"},
+            "league": {"name": "Liga", "base_only": True},
+            "teams": {"home": {"name": "C"}, "away": {"name": "A"}},
+            "goals": {"home": 2, "away": 2},
+        },
+    ]
+    batch_items = [
+        {
+            "fixture": {"id": 1001},
+            "events": [{"type": "Goal"}],
+            "statistics": [],
+            "players": [],
+        },
+        {
+            "fixture": {"id": 1002},
+            "events": [{"type": "Card"}],
+            "statistics": [
+                {
+                    "team": {"id": 30, "name": "C"},
+                    "statistics": [
+                        {"type": "Corner Kicks", "value": "7"},
+                        {"type": "Total Shots", "value": 14},
+                        {"type": "Shots on Goal", "value": 6},
+                        {"type": "Yellow Cards", "value": 3},
+                        {"type": "Red Cards", "value": None},
+                        {"type": "Fouls", "value": 11},
+                        {"type": "Ball Possession", "value": "55%"},
+                    ],
+                }
+            ],
+            "players": [
+                {
+                    "team": {"id": 30, "name": "C"},
+                    "players": [
+                        {
+                            "player": {"id": 99, "name": "Delantero"},
+                            "statistics": [
+                                {"shots": {"total": "4", "on": 2}, "goals": {"total": 1, "assists": 0}}
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    ]
+
+    def fake_request(endpoint, params=None):
+        calls.append((endpoint, params))
+        if params and "team" in params:
+            return {"response": base_items}
+        return {"response": batch_items}
+
+    provider = APIFootballProvider(key="dummy_key")
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    history = provider.get_team_last_matches("10", limit=20)
+
+    assert calls == [
+        ("fixtures", {"team": "10", "last": "5"}),
+        ("fixtures", {"ids": "1002-1001"}),
+    ]
+    assert [item["fixture"]["id"] for item in history] == [1002, 1001]
+    assert history[0]["league"]["base_only"] is True
+    assert history[0]["events"] == [{"type": "Card"}]
+    assert history[0]["statistics"] == [
+        {
+            "team": {"id": 30, "name": "C"},
+            "corners": 7,
+            "total_shots": 14,
+            "shots_on_target": 6,
+            "yellow_cards": 3,
+            "red_cards": 0,
+            "fouls": 11,
+        }
+    ]
+    assert history[0]["provider_statistics"] == batch_items[1]["statistics"]
+    assert history[0]["player_statistics"] == [
+        {
+            "player": {"id": 99, "name": "Delantero"},
+            "team": {"id": 30, "name": "C"},
+            "shots": {"total": 4, "on_target": 2},
+            "goals": {"total": 1},
+        }
+    ]
+    assert history[0]["players"] == batch_items[1]["players"]
+
+
+def test_recent_matches_skip_batch_when_base_is_already_enriched(monkeypatch):
+    calls = []
+    enriched = {
+        "fixture": {"id": 1001, "date": "2026-08-01T20:00:00+00:00"},
+        "statistics": [
+            {
+                "team": {"id": 10, "name": "A"},
+                "statistics": [{"type": "Corner Kicks", "value": 5}],
+            }
+        ],
+        "players": [
+            {
+                "team": {"id": 10, "name": "A"},
+                "players": [
+                    {
+                        "player": {"id": 8, "name": "Atacante"},
+                        "statistics": [{"shots": {"total": 2, "on": 1}, "goals": {"total": 0}}],
+                    }
+                ],
+            }
+        ],
+    }
+
+    def fake_request(endpoint, params=None):
+        calls.append((endpoint, params))
+        return {"response": [enriched]}
+
+    provider = APIFootballProvider(key="dummy_key")
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    history = provider.get_team_last_matches("10")
+
+    assert calls == [("fixtures", {"team": "10", "last": "5"})]
+    assert history[0]["statistics"][0]["corners"] == 5
+    assert history[0]["player_statistics"][0]["shots"]["on_target"] == 1
+
+
+def test_recent_matches_fall_back_to_base_when_batch_fails(monkeypatch):
+    calls = []
+    base = {
+        "fixture": {"id": 1001, "date": "2026-08-01T20:00:00+00:00"},
+        "league": {"name": "Liga"},
+        "teams": {"home": {"name": "A"}, "away": {"name": "B"}},
+        "goals": {"home": 1, "away": 0},
+    }
+
+    def fake_request(endpoint, params=None):
+        calls.append((endpoint, params))
+        if params and "ids" in params:
+            raise APIFootballAPIError("fallo controlado")
+        return {"response": [base]}
+
+    provider = APIFootballProvider(key="dummy_key")
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    history = provider.get_team_last_matches("10")
+
+    assert calls == [
+        ("fixtures", {"team": "10", "last": "5"}),
+        ("fixtures", {"ids": "1001"}),
+    ]
+    assert history == [base]
+
+
+def test_batch_empty_blocks_do_not_erase_existing_statistics(monkeypatch):
+    base = {
+        "fixture": {"id": 1001, "date": "2026-08-01T20:00:00+00:00"},
+        "statistics": [
+            {
+                "team": {"id": 10, "name": "A"},
+                "statistics": [{"type": "Total Shots", "value": 9}],
+            }
+        ],
+        "players": [],
+    }
+
+    def fake_request(endpoint, params=None):
+        if params and "ids" in params:
+            return {"response": [{"fixture": {"id": 1001}, "statistics": [], "players": []}]}
+        return {"response": [base]}
+
+    provider = APIFootballProvider(key="dummy_key")
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    history = provider.get_team_last_matches("10")
+
+    assert history[0]["statistics"][0]["total_shots"] == 9

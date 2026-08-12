@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     openai_max_retries: int = 0
 
 
-    # API Football
+    # API-SPORTS / API-Football
     sports_data_provider: str = "api-football"
 
     api_football_key: str = ""
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     api_football_is_rapidapi: bool = False
 
-    api_football_timeout_seconds: int = 2
+    api_football_timeout_seconds: int = 3
 
 
     # Football Data API
@@ -61,7 +61,14 @@ class Settings(BaseSettings):
             parsed = int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             parsed = 5
-        maximum = 5 if info.field_name == "openai_timeout_seconds" else 2
+        if info.field_name == "openai_timeout_seconds":
+            maximum = 5
+        elif info.field_name == "api_football_timeout_seconds":
+            # API-SPORTS can be slightly slower from Render. Detail calls run
+            # concurrently, so three seconds still fits the browser budget.
+            maximum = 3
+        else:
+            maximum = 2
         return max(1, min(parsed, maximum))
 
     @field_validator("openai_max_retries", mode="before")
