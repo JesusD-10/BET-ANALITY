@@ -8,6 +8,7 @@ import pytest
 from app.schemas.matches import MatchSummary
 from app.services import matches as matches_service
 from app.services.api_football import APIFootballProvider
+from app.services.sportmonks import SportmonksProvider
 
 
 SELECTED_DATE = date(2026, 8, 12)
@@ -46,6 +47,23 @@ def _football_data_match(fixture_id: str = "football-data-2001") -> MatchSummary
         odds_available=False,
         status="PROGRAMADO",
         source_provider="football-data",
+    )
+
+
+def _sportmonks_match(fixture_id: str = "sportmonks-1501") -> MatchSummary:
+    return MatchSummary(
+        id=fixture_id,
+        external_id=fixture_id.removeprefix("sportmonks-"),
+        competition="Liga real de Sportmonks",
+        kickoff_at=datetime(2026, 8, 12, 22, 0, tzinfo=timezone.utc),
+        home_team="Sporting Cristal",
+        away_team="Melgar",
+        home_team_id="201",
+        away_team_id="202",
+        data_quality=0.96,
+        odds_available=False,
+        status="PROGRAMADO",
+        source_provider="sportmonks",
     )
 
 
@@ -259,6 +277,67 @@ def test_valid_empty_primary_agenda_does_not_trigger_fallback(monkeypatch) -> No
     secondary_list.assert_not_called()
 
 
+def test_api_football_failure_uses_sportmonks_before_football_data(monkeypatch) -> None:
+    primary = APIFootballProvider(key="api-key")
+    secondary = SportmonksProvider("monks-token")
+    final_fallback = matches_service.FootballDataProvider(
+        "football-token", "https://football-data.test/v4", 10
+    )
+    expected = _sportmonks_match()
+    primary_list = MagicMock(side_effect=TimeoutError("api-football down"))
+    secondary_list = MagicMock(return_value=[expected])
+    final_list = MagicMock(side_effect=AssertionError("final fallback must not run"))
+    monkeypatch.setattr(primary, "list_fixtures", primary_list)
+    monkeypatch.setattr(secondary, "list_fixtures", secondary_list)
+    monkeypatch.setattr(final_fallback, "list_fixtures", final_list)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "sportmonks_provider", secondary)
+    monkeypatch.setattr(matches_service, "football_data_provider", final_fallback)
+    monkeypatch.setattr(matches_service.settings, "sports_data_provider", "api-football")
+    monkeypatch.setattr(matches_service.settings, "sportmonks_api_token", "monks-token")
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "football-token")
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == [expected]
+    assert result.source == "sportmonks"
+    assert result.notice is not None and "api-football" in result.notice
+    primary_list.assert_called_once_with(SELECTED_DATE)
+    secondary_list.assert_called_once_with(SELECTED_DATE)
+    final_list.assert_not_called()
+
+
+def test_third_provider_is_used_after_api_football_and_sportmonks_fail(monkeypatch) -> None:
+    primary = APIFootballProvider(key="api-key")
+    secondary = SportmonksProvider("monks-token")
+    final_fallback = matches_service.FootballDataProvider(
+        "football-token", "https://football-data.test/v4", 10
+    )
+    expected = _football_data_match("football-data-3001")
+    primary_list = MagicMock(side_effect=TimeoutError("api-football down"))
+    secondary_list = MagicMock(side_effect=TimeoutError("sportmonks down"))
+    final_list = MagicMock(return_value=[expected])
+    monkeypatch.setattr(primary, "list_fixtures", primary_list)
+    monkeypatch.setattr(secondary, "list_fixtures", secondary_list)
+    monkeypatch.setattr(final_fallback, "list_fixtures", final_list)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "sportmonks_provider", secondary)
+    monkeypatch.setattr(matches_service, "football_data_provider", final_fallback)
+    monkeypatch.setattr(matches_service.settings, "sports_data_provider", "api-football")
+    monkeypatch.setattr(matches_service.settings, "sportmonks_api_token", "monks-token")
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "football-token")
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == [expected]
+    assert result.source == "football-data"
+    assert result.notice is not None
+    assert "api-football" in result.notice and "sportmonks" in result.notice
+    primary_list.assert_called_once_with(SELECTED_DATE)
+    secondary_list.assert_called_once_with(SELECTED_DATE)
+    final_list.assert_called_once_with(SELECTED_DATE)
+
+
 def test_live_secondary_wins_over_stale_primary(monkeypatch) -> None:
     clock = {"now": 100.0}
     primary = APIFootballProvider(key="key")
@@ -343,6 +422,25 @@ def test_get_match_routes_football_data_prefix_even_when_api_football_is_active(
     monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
     monkeypatch.setattr(matches_service, "football_data_provider", secondary)
     monkeypatch.setattr(matches_service.settings, "football_data_api_token", "fallback-token")
+
+    result = matches_service.get_match(expected.id)
+
+    assert result is expected
+    secondary_lookup.assert_called_once_with(expected.id)
+    primary_lookup.assert_not_called()
+
+
+def test_get_match_routes_sportmonks_namespace(monkeypatch) -> None:
+    primary = APIFootballProvider(key="key")
+    secondary = SportmonksProvider("monks-token")
+    expected = _sportmonks_match("sportmonks-918")
+    primary_lookup = MagicMock(side_effect=AssertionError("Proveedor equivocado"))
+    secondary_lookup = MagicMock(return_value=expected)
+    monkeypatch.setattr(primary, "get_fixture", primary_lookup)
+    monkeypatch.setattr(secondary, "get_fixture", secondary_lookup)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "sportmonks_provider", secondary)
+    monkeypatch.setattr(matches_service.settings, "sportmonks_api_token", "monks-token")
 
     result = matches_service.get_match(expected.id)
 

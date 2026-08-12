@@ -96,24 +96,22 @@ def _consensus_market_payloads(
     available_families: set[str],
     limit: int = 4,
 ) -> list[dict]:
-    """Merge provider estimates while keeping the first provider's market set.
+    """Merge independently validated markets using adaptive provider quorum.
 
-    The deterministic primary result defines ordering and labels. When another
-    provider proposes the same canonical market, its probability is contrasted
-    through an equal-weight arithmetic mean. Unique secondary markets only fill
-    missing slots. Unverifiable market families are removed before aggregation.
+    A single successful completion may stand on its own. Once two or more
+    providers return valid JSON, a selection needs at least two independent
+    supporters. Opposing selections for one market are resolved by support;
+    tied leaders are discarded instead of allowing routing order to decide.
     """
 
-    provider_candidates: list[dict[str, tuple[dict, float]]] = []
-    provider_order: list[list[str]] = []
+    provider_candidates: list[dict[str, tuple[str, dict, float]]] = []
+    ordered_keys: list[str] = []
     for completion in completions:
         payload = completion.json_data or {}
         raw_markets = payload.get("markets", [])
-        candidates: dict[str, tuple[dict, float]] = {}
-        order: list[str] = []
+        candidates: dict[str, tuple[str, dict, float]] = {}
         if not isinstance(raw_markets, list):
             provider_candidates.append(candidates)
-            provider_order.append(order)
             continue
         for raw_market in raw_markets:
             if not isinstance(raw_market, dict):
@@ -130,41 +128,82 @@ def _consensus_market_payloads(
             except (TypeError, ValueError):
                 continue
             probability = max(0.05, min(0.95, probability))
-            candidates[market_key] = (raw_market, probability)
-            order.append(market_key)
-        provider_candidates.append(candidates)
-        provider_order.append(order)
-
-    ordered_keys: list[str] = []
-    for order in provider_order:
-        for market_key in order:
+            candidates[market_key] = (
+                _selection_signature(raw_market.get("selection")),
+                raw_market,
+                probability,
+            )
             if market_key not in ordered_keys:
                 ordered_keys.append(market_key)
+        provider_candidates.append(candidates)
 
     merged: list[dict] = []
-    for market_key in ordered_keys[: max(1, limit)]:
-        estimates: list[float] = []
-        base_market: dict | None = None
-        base_selection = ""
+    provider_count = len(completions)
+    required_support = 1 if provider_count == 1 else 2
+    for market_key in ordered_keys:
+        selection_groups: dict[str, list[tuple[dict, float]]] = {}
         for candidates in provider_candidates:
             candidate = candidates.get(market_key)
             if candidate is None:
                 continue
-            raw_market, probability = candidate
-            if base_market is None:
-                base_market = raw_market
-                base_selection = _selection_signature(raw_market.get("selection"))
-            elif _selection_signature(raw_market.get("selection")) != base_selection:
-                # Some market keys (for example BTTS) can represent opposing
-                # selections. Never average estimates that disagree on the bet.
-                continue
-            estimates.append(probability)
-        if base_market is None or not estimates:
+            selection, raw_market, probability = candidate
+            selection_groups.setdefault(selection, []).append((raw_market, probability))
+
+        eligible_groups = [
+            supporters
+            for supporters in selection_groups.values()
+            if len(supporters) >= required_support
+        ]
+        if not eligible_groups:
             continue
+        strongest_support = max(len(supporters) for supporters in eligible_groups)
+        strongest_groups = [
+            supporters
+            for supporters in eligible_groups
+            if len(supporters) == strongest_support
+        ]
+        if len(strongest_groups) != 1:
+            # A 1-1 or 2-2 split is evidence of disagreement, not consensus.
+            continue
+
+        supporters = strongest_groups[0]
+        base_market = supporters[0][0]
+        estimates = [probability for _, probability in supporters]
         consensus_market = dict(base_market)
         consensus_market["market_key"] = market_key
-        consensus_market["probability"] = sum(estimates) / len(estimates)
+        consensus_market["probability"] = _robust_probability(estimates)
+        consensus_market["confidence"] = _consensus_confidence(
+            support=len(supporters),
+            provider_count=provider_count,
+            estimates=estimates,
+        )
+
+        factors_for = _merge_text_items(supporters, "factors_for")
+        risks = _merge_text_items(supporters, "risks")
+        if factors_for:
+            consensus_market["factors_for"] = factors_for
+        else:
+            consensus_market.pop("factors_for", None)
+        if risks:
+            consensus_market["risks"] = risks
+        else:
+            consensus_market.pop("risks", None)
+
+        quality_estimates: list[float] = []
+        for raw_market, _ in supporters:
+            try:
+                quality = float(raw_market.get("data_quality"))
+            except (TypeError, ValueError):
+                continue
+            quality_estimates.append(max(0.0, min(1.0, quality)))
+        if quality_estimates:
+            consensus_market["data_quality"] = _robust_probability(quality_estimates)
+        else:
+            consensus_market.pop("data_quality", None)
+
         merged.append(consensus_market)
+        if len(merged) >= max(1, limit):
+            break
     return merged
 
 
@@ -174,6 +213,71 @@ def _selection_signature(value: object) -> str:
         character for character in normalized if not unicodedata.combining(character)
     )
     return " ".join(without_accents.split())
+
+
+def _robust_probability(estimates: list[float]) -> float:
+    """Aggregate up to four estimates while limiting outlier influence."""
+
+    ordered = sorted(estimates)
+    if not ordered:
+        raise ValueError("Se requiere al menos una estimación")
+    if len(ordered) == 1:
+        return ordered[0]
+    if len(ordered) == 2:
+        return sum(ordered) / 2
+    if len(ordered) == 3:
+        return ordered[1]
+    # The gateway caps analysis at four providers. Keeping this defensive slice
+    # also behaves sensibly if a caller supplies more completions in a test.
+    trimmed = ordered[1:-1]
+    return sum(trimmed) / len(trimmed)
+
+
+def _merge_text_items(
+    supporters: list[tuple[dict, float]],
+    field_name: str,
+) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw_market, _ in supporters:
+        values = raw_market.get(field_name, [])
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            clean_value = " ".join(value.split())
+            signature = _selection_signature(clean_value)
+            if not clean_value or signature in seen:
+                continue
+            seen.add(signature)
+            merged.append(clean_value)
+    return merged
+
+
+def _consensus_confidence(
+    *,
+    support: int,
+    provider_count: int,
+    estimates: list[float],
+) -> str:
+    if support <= 1:
+        return "Baja"
+    dispersion = max(estimates) - min(estimates)
+    coverage = support / max(1, provider_count)
+    if support >= 3 and coverage >= 0.75 and dispersion <= 0.08:
+        return "Alta"
+    if coverage >= 0.50 and dispersion <= 0.12:
+        return "Media-alta"
+    return "Media"
+
+
+def _bounded_data_quality(value: object, ceiling: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return ceiling
+    return max(0.0, min(ceiling, parsed))
 
 
 def _format_recent_history(history: list[dict | H2HMatchItem], limit: int = 5) -> str:
@@ -261,9 +365,9 @@ def _query_distributed_ai_analysis(
     away_history: list[dict | H2HMatchItem],
 ) -> MatchAnalysisResponse:
     h2h_text = "\n".join([f"- {m.date} | {m.home_team} {m.score} {m.away_team} (Ganador: {m.winner})" for m in h2h_matches[:10]]) or "Sin historial directo reciente."
-    injuries_text = "\n".join([f"- {inj.team}: {inj.player} ({inj.reason} - {inj.status})" for inj in injuries]) or "Sin bajas o lesionados reportados."
+    injuries_text = "\n".join([f"- {inj.team}: {inj.player} ({inj.reason} - {inj.status})" for inj in injuries]) or "Sin datos verificados de bajas o lesionados para este análisis."
     
-    lineup_text = "Alineaciones no confirmadas aún."
+    lineup_text = "Sin alineaciones verificadas disponibles para este análisis."
     if lineups and lineups.confirmed and lineups.home and lineups.away:
         home_xi = ", ".join([p.name for p in lineups.home.start_xi])
         away_xi = ", ".join([p.name for p in lineups.away.start_xi])
@@ -382,7 +486,10 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
                 best_odds=None,
                 expected_value=None,
                 confidence=m.get("confidence", "Media"),
-                data_quality=float(m.get("data_quality", match.data_quality)),
+                data_quality=_bounded_data_quality(
+                    m.get("data_quality", match.data_quality),
+                    match.data_quality,
+                ),
                 factors_for=m.get("factors_for", ["Análisis respaldado por forma reciente"]),
                 risks=m.get("risks", ["Varianza estándar de partido"]),
             )
@@ -395,14 +502,18 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
         provider_label = "+".join(completion.provider for completion in completions)
         model_version = f"multi-ai-consensus-{provider_label}"
         consensus_note = (
-            "Consenso multi-IA: las probabilidades coincidentes se promedian "
-            "con el mismo peso entre dos proveedores independientes."
+            f"Consenso multi-IA: participaron {len(completions)} proveedores válidos; "
+            "cada selección publicada recibió al menos dos apoyos y su probabilidad "
+            "se agregó de forma robusta."
         )
     else:
         model_version = (
             f"multi-ai-{primary_completion.provider}-{primary_completion.model}"
         )
-        consensus_note = "Análisis validado con el único proveedor disponible."
+        consensus_note = (
+            "Análisis individual: participó 1 proveedor válido; no hubo consenso "
+            "independiente disponible."
+        )
 
     raw_notes = parsed.get("notes", [])
     notes = [str(note) for note in raw_notes] if isinstance(raw_notes, list) else []

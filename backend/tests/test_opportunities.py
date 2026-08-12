@@ -67,12 +67,20 @@ def _advanced_market(
     )
 
 
-def test_external_timeouts_stay_inside_interactive_budget() -> None:
-    assert settings.ai_provider_timeout_seconds <= 5
-    assert settings.ai_total_timeout_seconds <= 5
-    assert settings.api_football_timeout_seconds <= 3
-    assert settings.football_data_timeout_seconds <= 2
-    assert settings.ai_max_provider_attempts <= 5
+def test_external_timeouts_leave_room_inside_frontend_deadlines() -> None:
+    assert settings.ai_provider_timeout_seconds <= 25
+    assert settings.ai_total_timeout_seconds <= 30
+    assert settings.api_football_timeout_seconds <= 15
+    assert settings.sportmonks_timeout_seconds <= 25
+    assert settings.football_data_timeout_seconds <= 15
+    assert settings.sports_data_total_timeout_seconds <= 60
+    assert (
+        settings.api_football_timeout_seconds
+        + settings.sportmonks_timeout_seconds
+        + settings.football_data_timeout_seconds
+        <= settings.sports_data_total_timeout_seconds
+    )
+    assert settings.ai_max_provider_attempts <= 4
 
 
 def test_settings_clamp_slow_values_and_ignore_placeholders() -> None:
@@ -81,19 +89,34 @@ def test_settings_clamp_slow_values_and_ignore_placeholders() -> None:
         ai_provider_timeout_seconds=30,
         ai_total_timeout_seconds=30,
         api_football_timeout_seconds=30,
+        sportmonks_timeout_seconds=30,
         football_data_timeout_seconds=30,
+        sports_data_total_timeout_seconds=120,
         ai_max_provider_attempts=30,
         xai_api_key="XAI_API_KEY",
         api_football_key="your_api_football_key_here",
+        sportmonks_api_token="your_sportmonks_api_token_here",
     )
 
-    assert configured.ai_provider_timeout_seconds == 5
-    assert configured.ai_total_timeout_seconds == 5
-    assert configured.api_football_timeout_seconds == 3
-    assert configured.football_data_timeout_seconds == 2
-    assert configured.ai_max_provider_attempts == 5
+    assert configured.ai_provider_timeout_seconds == 25
+    assert configured.ai_total_timeout_seconds == 30
+    assert configured.api_football_timeout_seconds == 15
+    assert configured.sportmonks_timeout_seconds == 25
+    assert configured.football_data_timeout_seconds == 15
+    assert configured.sports_data_total_timeout_seconds == 60
+    assert configured.ai_max_provider_attempts == 4
     assert configured.xai_api_key == ""
     assert configured.api_football_key == ""
+    assert configured.sportmonks_api_token == ""
+
+    short_budget = Settings(
+        _env_file=None,
+        api_football_timeout_seconds=15,
+        sportmonks_timeout_seconds=25,
+        football_data_timeout_seconds=15,
+        sports_data_total_timeout_seconds=10,
+    )
+    assert short_budget.sports_data_total_timeout_seconds == 55
 
 
 def test_multi_ai_timeout_uses_local_fallback(monkeypatch) -> None:
@@ -366,6 +389,7 @@ def test_cards_are_omitted_from_generated_builders_without_referee_metrics() -> 
 
 def test_analysis_contract_exposes_combinations_and_match_dreams(monkeypatch) -> None:
     monkeypatch.setattr(settings, "api_football_key", "")
+    monkeypatch.setattr(settings, "sportmonks_api_token", "")
     monkeypatch.setattr(settings, "football_data_api_token", "")
     monkeypatch.setattr(ai_gateway, "is_available", lambda: False)
     _fixture_cache.clear()
@@ -382,6 +406,7 @@ def test_analysis_contract_exposes_combinations_and_match_dreams(monkeypatch) ->
 
 def test_daily_dreams_are_diversified_and_respect_limit(monkeypatch) -> None:
     monkeypatch.setattr(settings, "api_football_key", "")
+    monkeypatch.setattr(settings, "sportmonks_api_token", "")
     monkeypatch.setattr(settings, "football_data_api_token", "")
     monkeypatch.setattr(ai_gateway, "is_available", lambda: False)
     _fixture_cache.clear()
@@ -399,6 +424,7 @@ def test_daily_dreams_are_diversified_and_respect_limit(monkeypatch) -> None:
 
 def test_mock_highlights_follow_requested_date(monkeypatch) -> None:
     monkeypatch.setattr(settings, "api_football_key", "")
+    monkeypatch.setattr(settings, "sportmonks_api_token", "")
     monkeypatch.setattr(settings, "football_data_api_token", "")
     _fixture_cache.clear()
 

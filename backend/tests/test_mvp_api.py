@@ -15,6 +15,7 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def use_explicit_demo_mode(monkeypatch):
     monkeypatch.setattr(settings, "api_football_key", "")
+    monkeypatch.setattr(settings, "sportmonks_api_token", "")
     monkeypatch.setattr(settings, "football_data_api_token", "")
     monkeypatch.setattr(ai_gateway, "is_available", lambda: False)
     _fixture_cache.clear()

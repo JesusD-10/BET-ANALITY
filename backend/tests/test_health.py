@@ -16,6 +16,7 @@ def test_health_returns_ok() -> None:
 
 def test_highlights_returns_matches(monkeypatch) -> None:
     monkeypatch.setattr(settings, "api_football_key", "")
+    monkeypatch.setattr(settings, "sportmonks_api_token", "")
     monkeypatch.setattr(settings, "football_data_api_token", "")
     _fixture_cache.clear()
     _fixture_by_id.clear()

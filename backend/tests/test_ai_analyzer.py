@@ -166,7 +166,9 @@ def test_consensus_averages_probabilities_and_backend_recalculates_fair_odds(mon
     assert analysis.markets[0].fair_odds == 1.54
     assert analysis.markets[0].best_odds is None
     assert analysis.model_version == "multi-ai-consensus-cerebras+openrouter"
-    assert any("mismo peso" in note for note in analysis.notes)
+    assert analysis.markets[0].factors_for == ["Forma", "Historial"]
+    assert analysis.markets[0].risks == ["Varianza", "Ritmo"]
+    assert any("participaron 2" in note for note in analysis.notes)
 
 
 def test_consensus_does_not_average_opposing_selections() -> None:
@@ -197,8 +199,202 @@ def test_consensus_does_not_average_opposing_selections() -> None:
 
     markets = _consensus_market_payloads(completions, {"result", "goals"})
 
+    assert markets == []
+
+
+def test_consensus_uses_median_for_three_and_merges_deduplicated_evidence() -> None:
+    completions = [
+        SimpleNamespace(
+            json_data={
+                "markets": [
+                    {
+                        "market_key": "TOTAL_GOALS_OVER_2_5",
+                        "selection": "Más de 2.5",
+                        "probability": 0.20,
+                        "data_quality": 0.95,
+                        "factors_for": ["Forma reciente", "Ataque local"],
+                        "risks": ["Rotaciones"],
+                    }
+                ]
+            }
+        ),
+        SimpleNamespace(
+            json_data={
+                "markets": [
+                    {
+                        "market_key": "TOTAL_GOALS_OVER_2_5",
+                        "selection": "más de 2.5",
+                        "probability": 0.60,
+                        "data_quality": 0.80,
+                        "factors_for": ["forma reciente", "Lesiones defensivas"],
+                        "risks": ["Clima"],
+                    }
+                ]
+            }
+        ),
+        SimpleNamespace(
+            json_data={
+                "markets": [
+                    {
+                        "market_key": "TOTAL_GOALS_OVER_2_5",
+                        "selection": "MÁS DE 2.5",
+                        "probability": 0.90,
+                        "data_quality": 0.70,
+                        "factors_for": ["Ritmo alto"],
+                        "risks": ["rotaciones", "Varianza"],
+                    }
+                ]
+            }
+        ),
+    ]
+
+    markets = _consensus_market_payloads(completions, {"result", "goals"})
+
+    assert markets[0]["probability"] == 0.60
+    assert markets[0]["data_quality"] == 0.80
+    assert markets[0]["confidence"] == "Media"
+    assert markets[0]["factors_for"] == [
+        "Forma reciente",
+        "Ataque local",
+        "Lesiones defensivas",
+        "Ritmo alto",
+    ]
+    assert markets[0]["risks"] == ["Rotaciones", "Clima", "Varianza"]
+
+
+def test_consensus_four_uses_middle_estimates_and_discards_two_two_tie() -> None:
+    probabilities = [0.10, 0.60, 0.70, 0.95]
+    completions = []
+    for index, probability in enumerate(probabilities):
+        completions.append(
+            SimpleNamespace(
+                json_data={
+                    "markets": [
+                        {
+                            "market_key": "TOTAL_GOALS_OVER_2_5",
+                            "selection": "Más de 2.5",
+                            "probability": probability,
+                        },
+                        {
+                            "market_key": "BOTH_TEAMS_TO_SCORE",
+                            "selection": "Sí" if index < 2 else "No",
+                            "probability": 0.55 + index * 0.02,
+                        },
+                    ]
+                }
+            )
+        )
+
+    markets = _consensus_market_payloads(completions, {"result", "goals"})
+
+    assert [market["market_key"] for market in markets] == ["TOTAL_GOALS_OVER_2_5"]
+    assert markets[0]["probability"] == pytest.approx(0.65)
+
+
+def test_consensus_requires_two_supporters_after_multiple_successes() -> None:
+    completions = [
+        SimpleNamespace(
+            json_data={
+                "markets": [
+                    {
+                        "market_key": "WINNER_HOME",
+                        "selection": "Local",
+                        "probability": 0.60,
+                    }
+                ]
+            }
+        ),
+        SimpleNamespace(
+            json_data={
+                "markets": [
+                    {
+                        "market_key": "TOTAL_GOALS_OVER_2_5",
+                        "selection": "Más de 2.5",
+                        "probability": 0.58,
+                    }
+                ]
+            }
+        ),
+    ]
+
+    assert _consensus_market_payloads(completions, {"result", "goals"}) == []
+
+
+def test_consensus_uses_the_only_selection_with_adaptive_quorum() -> None:
+    completions = []
+    for selection, probability in (
+        ("Sí", 0.62),
+        ("si", 0.66),
+        ("No", 0.40),
+    ):
+        completions.append(
+            SimpleNamespace(
+                json_data={
+                    "markets": [
+                        {
+                            "market_key": "BOTH_TEAMS_TO_SCORE",
+                            "selection": selection,
+                            "probability": probability,
+                        }
+                    ]
+                }
+            )
+        )
+
+    markets = _consensus_market_payloads(completions, {"result", "goals"})
+
     assert markets[0]["selection"] == "Sí"
-    assert markets[0]["probability"] == 0.62
+    assert markets[0]["probability"] == pytest.approx(0.64)
+    assert markets[0]["confidence"] == "Media-alta"
+
+
+def test_analysis_caps_consensus_quality_and_reports_four_participants(monkeypatch):
+    match = MatchSummary(
+        id="consensus-four",
+        competition="Liga",
+        kickoff_at=datetime.now(timezone.utc),
+        home_team="Local",
+        away_team="Visitante",
+        data_quality=0.76,
+        odds_available=False,
+        status="PROGRAMADO",
+    )
+    completions = []
+    for index, provider in enumerate(("deepseek", "cerebras", "xai", "openrouter")):
+        completions.append(
+            SimpleNamespace(
+                json_data={
+                    "markets": [
+                        {
+                            "market_key": "TOTAL_GOALS_OVER_2_5",
+                            "label": "Goles",
+                            "selection": "Más de 2.5",
+                            "probability": 0.60 + index * 0.01,
+                            "data_quality": 0.99,
+                            "factors_for": [f"Factor {index}"],
+                            "risks": [f"Riesgo {index}"],
+                        }
+                    ],
+                    "notes": [],
+                },
+                provider=provider,
+                model=f"model-{index}",
+            )
+        )
+    monkeypatch.setattr(ai_gateway, "is_available", lambda: True)
+    monkeypatch.setattr(
+        ai_gateway,
+        "complete_json_consensus",
+        lambda **_: completions,
+    )
+
+    analysis = analyze_match_with_ai(match)
+
+    assert analysis.markets[0].probability == pytest.approx(0.615)
+    assert analysis.markets[0].data_quality == match.data_quality
+    assert analysis.markets[0].confidence == "Alta"
+    assert len(analysis.markets[0].factors_for) == 4
+    assert any("participaron 4" in note for note in analysis.notes)
 
 
 def test_advanced_families_activate_only_from_explicit_statistics():

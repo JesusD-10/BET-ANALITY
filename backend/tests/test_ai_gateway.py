@@ -235,6 +235,79 @@ def test_analysis_consensus_calls_two_free_providers_in_parallel(monkeypatch) ->
     ]
 
 
+def test_analysis_consensus_calls_four_providers_in_parallel_and_keeps_order(
+    monkeypatch,
+) -> None:
+    gateway = AIGateway(
+        _settings(
+            xai_api_key="xai",
+            deepseek_api_key="deepseek",
+            cerebras_api_key="cerebras",
+            openrouter_api_key="openrouter",
+            ai_max_provider_attempts=4,
+            ai_allow_paid_providers=True,
+        )
+    )
+    barrier = Barrier(4)
+    thread_ids: set[int] = set()
+
+    def concurrent_request(provider, messages, **kwargs):
+        thread_ids.add(get_ident())
+        barrier.wait(timeout=1)
+        return '{"markets": []}', provider.model
+
+    monkeypatch.setattr(gateway, "_request_provider", concurrent_request)
+
+    completions = gateway.complete_json_consensus(
+        [{"role": "user", "content": "analiza"}],
+        task="analysis",
+        routing_key="four-parallel",
+        max_providers=99,
+    )
+
+    expected = gateway._ordered_providers("analysis", "four-parallel")
+    assert len(thread_ids) == 4
+    assert [item.provider for item in completions] == [item.name for item in expected]
+
+
+def test_analysis_consensus_respects_attempt_cap_and_keeps_partial_results(
+    monkeypatch,
+) -> None:
+    gateway = AIGateway(
+        _settings(
+            xai_api_key="xai",
+            deepseek_api_key="deepseek",
+            cerebras_api_key="cerebras",
+            openrouter_api_key="openrouter",
+            ai_max_provider_attempts=3,
+            ai_allow_paid_providers=True,
+        )
+    )
+    ordered = gateway._ordered_providers("analysis", "partial-wave")
+    attempted: list[str] = []
+
+    def partial_failure(provider, messages, **kwargs):
+        attempted.append(provider.name)
+        if provider.name == ordered[1].name:
+            raise ValueError("invalid")
+        return '{"markets": []}', provider.model
+
+    monkeypatch.setattr(gateway, "_request_provider", partial_failure)
+
+    completions = gateway.complete_json_consensus(
+        [{"role": "user", "content": "analiza"}],
+        task="analysis",
+        routing_key="partial-wave",
+        max_providers=4,
+    )
+
+    assert set(attempted) == {item.name for item in ordered[:3]}
+    assert [item.provider for item in completions] == [
+        ordered[0].name,
+        ordered[2].name,
+    ]
+
+
 def test_analysis_consensus_accepts_one_valid_provider(monkeypatch) -> None:
     gateway = AIGateway(
         _settings(cerebras_api_key="one", openrouter_api_key="two")

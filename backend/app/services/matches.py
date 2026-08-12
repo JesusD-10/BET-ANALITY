@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import inspect
 import logging
 from threading import Lock
 import time
@@ -19,6 +20,7 @@ from app.schemas.matches import (
 from app.services.ai_analyzer import analyze_match_with_ai
 from app.services.api_football import APIFootballAPIError, APIFootballProvider, BookmakerQuote
 from app.services.opportunities import enrich_analysis_with_opportunities
+from app.services.sportmonks import SportmonksAPIError, SportmonksProvider
 
 logger = logging.getLogger(__name__)
 SPORTS_TIMEZONE = ZoneInfo("America/Lima")
@@ -103,7 +105,12 @@ class FootballDataProvider:
     def _headers(self) -> dict[str, str]:
         return {"X-Auth-Token": self.token}
 
-    def list_fixtures(self, match_date: date) -> list[MatchSummary]:
+    def list_fixtures(
+        self,
+        match_date: date,
+        *,
+        timeout: float | None = None,
+    ) -> list[MatchSummary]:
         endpoint = f"{self.base_url}/matches"
         from_date = match_date.isoformat()
         # football-data filters by UTC dates. A Lima match late at night can
@@ -115,7 +122,7 @@ class FootballDataProvider:
             endpoint,
             params={"dateFrom": from_date, "dateTo": to_date},
             headers=self._headers(),
-            timeout=self.timeout,
+            timeout=self.timeout if timeout is None else max(0.1, timeout),
         )
         response.raise_for_status()
         payload = response.json()
@@ -279,6 +286,11 @@ api_football_provider = APIFootballProvider(
     is_rapidapi=settings.api_football_is_rapidapi,
     timeout=settings.api_football_timeout_seconds,
 )
+sportmonks_provider = SportmonksProvider(
+    token=settings.sportmonks_api_token,
+    base_url=settings.sportmonks_base_url,
+    timeout=settings.sportmonks_timeout_seconds,
+)
 football_data_provider = FootballDataProvider(
     settings.football_data_api_token,
     settings.football_data_base_url,
@@ -379,6 +391,8 @@ def _index_matches(matches: list[MatchSummary]) -> None:
 
 def _active_provider():
     provider_setting = settings.sports_data_provider.casefold()
+    if provider_setting in {"sportmonks", "sport-monks", "monks"} and settings.sportmonks_api_token:
+        return sportmonks_provider
     if provider_setting in {
         "api-football",
         "apifootball",
@@ -388,9 +402,12 @@ def _active_provider():
         return api_football_provider
     if provider_setting in {"football-data", "footballdata"} and settings.football_data_api_token:
         return football_data_provider
-    # API-Football may be suspended or its key may have been removed. A
-    # configured Football-Data token is still a real source and must win over
-    # demo mode even when SPORTS_DATA_PROVIDER keeps its default value.
+    # Keep a deterministic automatic priority when the named provider is not
+    # configured. Football-Data remains the final real-data fallback.
+    if settings.api_football_key:
+        return api_football_provider
+    if settings.sportmonks_api_token:
+        return sportmonks_provider
     if settings.football_data_api_token:
         return football_data_provider
     return mock_provider
@@ -401,18 +418,46 @@ def _provider_name(provider: object) -> str:
 
 
 def _provider_chain() -> list[object]:
-    """Return live providers in priority order for the current deployment."""
+    """Return configured providers with Football-Data always in last place."""
 
     primary = _active_provider()
     if primary is mock_provider:
         return []
-    providers = [primary]
-    if (
-        isinstance(primary, APIFootballProvider)
-        and settings.football_data_api_token
-        and football_data_provider is not primary
-    ):
-        providers.append(football_data_provider)
+    providers: list[object] = []
+
+    # A monkeypatched/custom primary is also retained, which keeps the routing
+    # helper testable without relying on process-global credentials.
+    if not isinstance(primary, FootballDataProvider):
+        providers.append(primary)
+
+    preferred = settings.sports_data_provider.casefold()
+    first_two = (
+        [sportmonks_provider, api_football_provider]
+        if preferred in {"sportmonks", "sport-monks", "monks"}
+        else [api_football_provider, sportmonks_provider]
+    )
+    for provider in first_two:
+        configured = (
+            settings.api_football_key
+            if isinstance(provider, APIFootballProvider)
+            else settings.sportmonks_api_token
+        )
+        if configured and all(
+            _provider_name(provider) != _provider_name(existing)
+            for existing in providers
+        ):
+            providers.append(provider)
+
+    if settings.football_data_api_token:
+        fallback = primary if isinstance(primary, FootballDataProvider) else football_data_provider
+        if all(
+            _provider_name(fallback) != _provider_name(existing)
+            for existing in providers
+        ):
+            providers.append(fallback)
+    elif isinstance(primary, FootballDataProvider):
+        # Custom providers used in tests carry their credential internally.
+        providers.append(primary)
     return providers
 
 
@@ -430,6 +475,7 @@ def _provider_for_match_id(
     active = _active_provider()
     source = (source_provider or "").casefold()
     wants_api_football = match_id.startswith("api-football-") or source == "api-football"
+    wants_sportmonks = match_id.startswith("sportmonks-") or source == "sportmonks"
     wants_football_data = match_id.startswith("football-data-") or source == "football-data"
 
     if wants_api_football:
@@ -437,6 +483,12 @@ def _provider_for_match_id(
             return active
         if settings.api_football_key:
             return api_football_provider
+        return None
+    if wants_sportmonks:
+        if isinstance(active, SportmonksProvider):
+            return active
+        if settings.sportmonks_api_token:
+            return sportmonks_provider
         return None
     if wants_football_data:
         if isinstance(active, FootballDataProvider):
@@ -468,11 +520,43 @@ def _provider_retry_delay(exc: Exception) -> int:
 
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        if status in {401, 403, 429}:
+        if status == 429:
+            retry_after = exc.response.headers.get("Retry-After")
+            try:
+                return max(10, min(int(float(retry_after or 0)), 60 * 60))
+            except (TypeError, ValueError):
+                return 5 * 60
+        if status in {401, 403}:
             return 5 * 60
-    if isinstance(exc, APIFootballAPIError):
+    if isinstance(exc, (APIFootballAPIError, SportmonksAPIError)):
         return 60
     return _PROVIDER_RETRY_COOLDOWN_SECONDS
+
+
+def _list_fixtures_with_timeout(
+    provider: object,
+    selected_date: date,
+    remaining: float,
+) -> list[MatchSummary]:
+    """Pass the route's remaining budget when the adapter supports it.
+
+    Signature inspection also keeps lightweight test doubles and older custom
+    adapters compatible: callables without a named ``timeout`` receive only the
+    date argument.
+    """
+
+    method = provider.list_fixtures  # type: ignore[attr-defined]
+    try:
+        supports_timeout = "timeout" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        supports_timeout = False
+    if supports_timeout:
+        provider_timeout = float(getattr(provider, "timeout", remaining))
+        return method(
+            selected_date,
+            timeout=max(0.1, min(provider_timeout, remaining)),
+        )
+    return method(selected_date)
 
 
 def _latest_stale_result(
@@ -500,6 +584,7 @@ def _latest_stale_result(
 def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult:
     selected_date = match_date or datetime.now(SPORTS_TIMEZONE).date()
     providers = _provider_chain()
+    route_deadline = time.monotonic() + settings.sports_data_total_timeout_seconds
     route_cache_key = _route_cache_key(providers, selected_date)
     cached = _cache_get(_fixture_cache, route_cache_key, _FIXTURE_CACHE_TTL_SECONDS)
     if cached is not None:
@@ -548,15 +633,46 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
             failed_sources.append(source)
             continue
 
+        remaining = route_deadline - time.monotonic()
+        if remaining <= 0:
+            failed_sources.extend(
+                _provider_name(p)
+                for p in providers
+                if _provider_name(p) not in failed_sources
+            )
+            logger.warning(
+                "La cadena deportiva agotó su plazo de %ss antes de consultar %s.",
+                settings.sports_data_total_timeout_seconds,
+                source,
+            )
+            break
+
+        provider_started_at = time.monotonic()
         try:
-            matches = provider.list_fixtures(selected_date)  # type: ignore[attr-defined]
+            matches = _list_fixtures_with_timeout(provider, selected_date, remaining)
+            if not isinstance(matches, list):
+                raise ValueError("El proveedor no devolvió una lista de partidos")
         except Exception as exc:
-            logger.error("No se pudo actualizar la agenda desde %s: %s", source, exc)
+            elapsed_ms = round((time.monotonic() - provider_started_at) * 1000)
+            logger.error(
+                "No se pudo actualizar la agenda desde %s tras %sms (%s).",
+                source,
+                elapsed_ms,
+                type(exc).__name__,
+            )
             failed_sources.append(source)
             _provider_retry_after[provider_cache_key] = (
                 time.monotonic() + _provider_retry_delay(exc)
             )
             continue
+
+        elapsed_ms = round((time.monotonic() - provider_started_at) * 1000)
+        logger.info(
+            "Agenda recibida desde %s en %sms (%s partidos).",
+            source,
+            elapsed_ms,
+            len(matches),
+        )
 
         # [] is a valid provider answer (including HTTP 204), not a signal to
         # query another source or inject demo fixtures.
@@ -670,6 +786,8 @@ def get_match(match_id: str) -> MatchSummary | None:
 
     try:
         if isinstance(provider, APIFootballProvider) and match_id.startswith("api-football-"):
+            found = provider.get_fixture(match_id)
+        elif isinstance(provider, SportmonksProvider) and match_id.startswith("sportmonks-"):
             found = provider.get_fixture(match_id)
         elif isinstance(provider, FootballDataProvider) and match_id.startswith("football-data-"):
             found = provider.get_fixture(match_id)
@@ -800,7 +918,6 @@ def _mock_histories(match: MatchSummary) -> tuple[list[H2HMatchItem], list[H2HMa
 
 
 def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisResponse | None:
-    analysis_started_at = time.monotonic()
     cache_key = (match_id, use_external_ai)
     cached = _get_cached_analysis(cache_key)
     if cached is not None:
@@ -873,6 +990,33 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
             )
             lineups = provider.merge_lineups(lineups, probable_lineups)
 
+    elif isinstance(provider, SportmonksProvider) and match.id.startswith("sportmonks-"):
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            h2h_future = (
+                executor.submit(
+                    provider.get_head_to_head,
+                    match.home_team_id,
+                    match.away_team_id,
+                    5,
+                )
+                if match.home_team_id and match.away_team_id
+                else None
+            )
+            home_future = (
+                executor.submit(provider.get_team_last_matches, match.home_team_id, 5)
+                if match.home_team_id
+                else None
+            )
+            away_future = (
+                executor.submit(provider.get_team_last_matches, match.away_team_id, 5)
+                if match.away_team_id
+                else None
+            )
+            h2h_matches = _future_value(h2h_future, [])
+            home_history = _future_value(home_future, [])
+            away_history = _future_value(away_future, [])
+            home_recent_matches = provider.normalize_history(home_history, 5)
+            away_recent_matches = provider.normalize_history(away_history, 5)
     elif isinstance(provider, FootballDataProvider) and match.id.startswith("football-data-"):
         with ThreadPoolExecutor(max_workers=3) as executor:
             h2h_future = executor.submit(provider.get_head_to_head, match.id, 10)
@@ -916,9 +1060,6 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
             tendency="Sin métricas arbitrales verificadas",
         )
 
-    # Leave enough of the 10-second browser budget for serialization/network.
-    # When sports data was slow, the deterministic model answers immediately.
-    external_ai_has_budget = time.monotonic() - analysis_started_at < 4.5
     analysis = analyze_match_with_ai(
         match=match,
         referee_info=referee_info,
@@ -927,7 +1068,10 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
         h2h_matches=h2h_matches,
         home_last_matches=home_history,
         away_last_matches=away_history,
-        allow_external_ai=use_external_ai and external_ai_has_budget,
+        # Sports-provider latency no longer disables the requested four-model
+        # interpretation. The frontend has a dedicated analysis deadline and
+        # the AI calls share one bounded parallel window.
+        allow_external_ai=use_external_ai,
     )
     analysis = _apply_verified_market_odds(analysis, odds_quotes)
     analysis.home_recent_matches = home_recent_matches[:5]

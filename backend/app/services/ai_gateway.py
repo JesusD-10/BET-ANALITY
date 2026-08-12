@@ -1,7 +1,7 @@
 """Deterministic, fault-tolerant routing for chat-completions-compatible APIs.
 
 Text tasks use one provider with sequential fallback. Match analysis can query
-up to two providers in parallel for contrast. Both paths share a hard deadline
+up to four providers in parallel for contrast. Both paths share a hard deadline
 so fault tolerance never multiplies the latency visible to the user.
 """
 
@@ -310,13 +310,13 @@ class AIGateway:
         task: str,
         routing_key: str,
         max_tokens: int = 1800,
-        max_providers: int = 2,
+        max_providers: int = 4,
     ) -> list[AICompletion]:
-        """Query at most two providers concurrently under one shared deadline.
+        """Query at most four providers concurrently under one shared deadline.
 
         Results are returned in deterministic routing order, never completion
-        order. One valid result is sufficient; callers can contrast two when
-        both finish successfully. There is no second wave of requests, keeping
+        order. One valid result is sufficient; callers can contrast all results
+        that finish successfully. There is no second wave of requests, keeping
         the total latency bounded by ``ai_total_timeout_seconds``.
         """
 
@@ -326,7 +326,7 @@ class AIGateway:
 
         provider_limit = max(
             1,
-            min(int(max_providers), 2, self.config.ai_max_provider_attempts),
+            min(int(max_providers), 4, self.config.ai_max_provider_attempts),
         )
         selected = providers[:provider_limit]
         deadline = time.monotonic() + self.config.ai_total_timeout_seconds
@@ -379,8 +379,8 @@ class AIGateway:
             if completions:
                 return completions
         finally:
-            # Running HTTP calls keep their own <=5 s transport timeout; do not
-            # wait for one failed provider before returning a valid peer result.
+            # Running HTTP calls keep their own bounded transport timeout; do
+            # not wait for one failed provider before returning valid peers.
             executor.shutdown(wait=False, cancel_futures=True)
 
         attempted = ", ".join(provider.name for provider in selected)

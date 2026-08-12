@@ -1,6 +1,7 @@
 from pathlib import Path
+from typing import Self
 
-from pydantic import ValidationInfo, field_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -20,18 +21,18 @@ class Settings(BaseSettings):
 
 
     # Motor multi-IA. Las consultas simples rotan un proveedor; el análisis
-    # puede contrastar dos en paralelo dentro del mismo presupuesto total.
+    # contrasta hasta cuatro proveedores en paralelo dentro de un plazo común.
     ai_enabled: bool = True
 
-    # El modo gratuito excluye proveedores con cobro por token incluso si se
-    # configuró accidentalmente una clave. Requiere opt-in explícito.
-    ai_allow_paid_providers: bool = False
+    # Puede ponerse en false para excluir xAI y DeepSeek cuando se quiera un
+    # despliegue estrictamente gratuito. El consenso de cuatro requiere true.
+    ai_allow_paid_providers: bool = True
 
-    ai_provider_timeout_seconds: int = 4
+    ai_provider_timeout_seconds: int = 18
 
-    ai_total_timeout_seconds: int = 5
+    ai_total_timeout_seconds: int = 22
 
-    ai_max_provider_attempts: int = 3
+    ai_max_provider_attempts: int = 4
 
     # xAI / Grok
     xai_api_key: str = ""
@@ -83,7 +84,15 @@ class Settings(BaseSettings):
 
     api_football_is_rapidapi: bool = False
 
-    api_football_timeout_seconds: int = 3
+    api_football_timeout_seconds: int = 10
+
+
+    # Sportmonks Football API v3
+    sportmonks_api_token: str = ""
+
+    sportmonks_base_url: str = "https://api.sportmonks.com/v3/football"
+
+    sportmonks_timeout_seconds: int = 15
 
 
     # Football Data API
@@ -91,32 +100,43 @@ class Settings(BaseSettings):
 
     football_data_base_url: str = "https://api.football-data.org/v4"
 
-    football_data_timeout_seconds: int = 2
+    football_data_timeout_seconds: int = 10
+
+    # Presupuesto de la cadena de agenda completa. Los tres proveedores se
+    # prueban en secuencia, pero el navegador deja un margen adicional para el
+    # análisis multi-IA y la serialización de la respuesta.
+    sports_data_total_timeout_seconds: int = 40
 
     @field_validator(
         "ai_provider_timeout_seconds",
         "ai_total_timeout_seconds",
         "api_football_timeout_seconds",
+        "sportmonks_timeout_seconds",
         "football_data_timeout_seconds",
+        "sports_data_total_timeout_seconds",
         mode="before",
     )
     @classmethod
     def clamp_external_timeout(cls, value: object, info: ValidationInfo) -> int:
-        """Keep every external call inside the interactive 10-second budget."""
+        """Bound configurable network waits without forcing premature aborts."""
         try:
             parsed = int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             parsed = 5
         if info.field_name == "ai_provider_timeout_seconds":
-            maximum = 5
+            maximum = 25
         elif info.field_name == "ai_total_timeout_seconds":
-            maximum = 5
+            maximum = 30
         elif info.field_name == "api_football_timeout_seconds":
-            # API-SPORTS can be slightly slower from Render. Detail calls run
-            # concurrently, so three seconds still fits the browser budget.
-            maximum = 3
+            maximum = 15
+        elif info.field_name == "sportmonks_timeout_seconds":
+            # Sportmonks' official examples use 30 seconds. The interactive
+            # route uses a smaller configurable ceiling plus provider fallback.
+            maximum = 25
+        elif info.field_name == "sports_data_total_timeout_seconds":
+            maximum = 60
         else:
-            maximum = 2
+            maximum = 15
         return max(1, min(parsed, maximum))
 
     @field_validator("ai_max_provider_attempts", mode="before")
@@ -126,7 +146,30 @@ class Settings(BaseSettings):
             parsed = int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             parsed = 3
-        return max(1, min(parsed, 5))
+        return max(1, min(parsed, 4))
+
+    @model_validator(mode="after")
+    def preserve_all_sports_provider_attempts(self) -> Self:
+        """Reserve enough backend time to attempt every configured adapter."""
+
+        required = (
+            self.api_football_timeout_seconds
+            + self.sportmonks_timeout_seconds
+            + self.football_data_timeout_seconds
+        )
+        self.sports_data_total_timeout_seconds = min(
+            60,
+            max(self.sports_data_total_timeout_seconds, required),
+        )
+        return self
+
+    @field_validator("sportmonks_base_url")
+    @classmethod
+    def require_secure_sportmonks_url(cls, value: str) -> str:
+        clean_value = value.strip().rstrip("/")
+        if not clean_value.casefold().startswith("https://"):
+            raise ValueError("SPORTMONKS_BASE_URL debe usar HTTPS")
+        return clean_value
 
     @field_validator(
         "xai_api_key",
@@ -135,6 +178,7 @@ class Settings(BaseSettings):
         "github_models_token",
         "openrouter_api_key",
         "api_football_key",
+        "sportmonks_api_token",
         "football_data_api_token",
     )
     @classmethod
@@ -145,7 +189,11 @@ class Settings(BaseSettings):
             f"your_{info.field_name}_here",
             f"tu_{info.field_name}_aqui",
             "your_api_football_key_here",
+            "your_sportmonks_api_token_here",
+            "tu_token_sportmonks",
+            "tu_sportmonks_api_token_aqui",
             "your_football_data_token_here",
+            "tu_token_football_data",
             "tu_football_data_token_aqui",
         }
         if clean_value.casefold() in placeholders:

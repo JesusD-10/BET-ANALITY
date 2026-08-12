@@ -58,10 +58,21 @@ class APIFootballProvider:
             "x-apisports-key": self.key,
         }
 
-    def _request(self, endpoint: str, params: dict | None = None) -> dict:
+    def _request(
+        self,
+        endpoint: str,
+        params: dict | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict:
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         try:
-            response = httpx.get(url, headers=self._get_headers(), params=params, timeout=self.timeout)
+            response = httpx.get(
+                url,
+                headers=self._get_headers(),
+                params=params,
+                timeout=self.timeout if timeout is None else max(0.1, timeout),
+            )
             response.raise_for_status()
             if response.status_code == 204:
                 return {"errors": [], "results": 0, "response": []}
@@ -130,11 +141,17 @@ class APIFootballProvider:
             source_url=f"{self.base_url}/fixtures?id={fixture_id}",
         )
 
-    def list_fixtures(self, match_date: date | None = None) -> list[MatchSummary]:
+    def list_fixtures(
+        self,
+        match_date: date | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> list[MatchSummary]:
         target_date = (match_date or datetime.now(SPORTS_TIMEZONE).date()).isoformat()
         data = self._request(
             "fixtures",
             params={"date": target_date, "timezone": SPORTS_TIMEZONE.key},
+            timeout=timeout,
         )
         response_items = data.get("response")
         if not isinstance(response_items, list):

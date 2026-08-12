@@ -1,5 +1,8 @@
 export const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "https://bet-anality.onrender.com/api/v1";
-export const requestTimeoutMs = 10_000;
+// Agenda may traverse three sports providers sequentially. Match analysis then
+// queries complementary data and up to four AI providers concurrently.
+export const requestTimeoutMs = 65_000;
+export const analysisRequestTimeoutMs = 90_000;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -44,7 +47,11 @@ async function throwApiError(response: Response, fallbackDetail: string): Promis
   throw new ApiError(response.status, detail);
 }
 
-export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+export async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = requestTimeoutMs,
+) {
   const controller = new AbortController();
   const abortFromParent = () => controller.abort();
   if (init.signal?.aborted) controller.abort();
@@ -53,7 +60,7 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   const timeoutId = globalThis.setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, requestTimeoutMs);
+  }, timeoutMs);
 
   try {
     return await fetch(input, { ...init, signal: controller.signal });
@@ -230,7 +237,7 @@ export async function getAnalysis(id: string, signal?: AbortSignal) {
   const response = await apiFetch(`${apiUrl}/matches/${encodeURIComponent(id)}/analysis`, {
     cache: "no-store",
     signal,
-  });
+  }, analysisRequestTimeoutMs);
   if (!response.ok) await throwApiError(response, "El análisis no está disponible");
   return response.json() as Promise<Analysis>;
 }
