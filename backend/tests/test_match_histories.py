@@ -1,4 +1,5 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+import time
 
 import httpx
 import pytest
@@ -54,7 +55,12 @@ def test_api_football_normalizes_recent_matches_and_caps_them_to_five(monkeypatc
     raw_history = provider.get_team_last_matches("42", limit=20)
     history = provider.normalize_history(raw_history, 5)
 
-    assert calls == [{"endpoint": "fixtures", "params": {"team": "42", "last": "5"}}]
+    assert calls == [
+        {
+            "endpoint": "fixtures",
+            "params": {"team": "42", "last": "5", "status": "FT-AET-PEN"},
+        }
+    ]
     assert len(history) == 5
     assert [item.date for item in history] == [
         "2026-07-07",
@@ -65,6 +71,42 @@ def test_api_football_normalizes_recent_matches_and_caps_them_to_five(monkeypatc
     ]
     assert history[0].score == "2 - 1"
     assert provider.normalize_history([_api_football_fixture(1, home_goals=None)], 5) == []
+
+
+def test_api_football_recent_form_excludes_unfinished_fixtures(monkeypatch) -> None:
+    finished = _api_football_fixture(5)
+    finished["fixture"]["status"] = {"short": "FT"}
+    scheduled = _api_football_fixture(6, home_goals=0)
+    scheduled["fixture"]["status"] = {"short": "NS"}
+    monkeypatch.setattr(
+        APIFootballProvider,
+        "_request",
+        lambda self, endpoint, params=None: {"response": [scheduled, finished]},
+    )
+
+    provider = APIFootballProvider(key="test")
+    history = provider.get_team_last_matches("42", enrich=False)
+
+    assert history == [finished]
+
+
+def test_published_lineups_are_requested_only_close_to_kickoff() -> None:
+    now = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+    match = MatchSummary(
+        id="api-football-10",
+        competition="Liga",
+        kickoff_at=now + timedelta(hours=2),
+        home_team="Local",
+        away_team="Visitante",
+        status="PROGRAMADO",
+        source_provider="api-football",
+    )
+
+    assert matches_service._should_fetch_published_lineups(match, now) is False
+    match.kickoff_at = now + timedelta(minutes=61)
+    assert matches_service._should_fetch_published_lineups(match, now) is False
+    match.kickoff_at = now + timedelta(minutes=60)
+    assert matches_service._should_fetch_published_lineups(match, now) is True
 
 
 def test_football_data_normalizes_recent_matches_and_caps_request(monkeypatch) -> None:
@@ -105,8 +147,91 @@ def test_football_data_normalizes_recent_matches_and_caps_request(monkeypatch) -
 @pytest.fixture(autouse=True)
 def clear_analysis_cache():
     matches_service._analysis_cache.clear()
+    matches_service._fixture_by_id.clear()
     yield
     matches_service._analysis_cache.clear()
+    matches_service._fixture_by_id.clear()
+
+
+def _indexed_match(kickoff_at: datetime, match_id: str = "api-football-991") -> MatchSummary:
+    return MatchSummary(
+        id=match_id,
+        external_id=match_id.removeprefix("api-football-"),
+        competition="Liga real",
+        kickoff_at=kickoff_at,
+        home_team="Local",
+        away_team="Visitante",
+        home_team_id="1",
+        away_team_id="2",
+        status="PROGRAMADO",
+        source_provider="api-football",
+    )
+
+
+def test_analysis_cached_before_t60_expires_when_lineup_window_is_crossed(monkeypatch) -> None:
+    kickoff = datetime(2026, 8, 20, 20, 0, tzinfo=timezone.utc)
+    analysis = matches_service._quick_analysis(_indexed_match(kickoff))
+    key = (analysis.match.id, False)
+    clock = [200.0]
+    monkeypatch.setattr(matches_service.time, "monotonic", lambda: clock[0])
+    matches_service._analysis_cache[key] = (100.0, analysis)
+
+    assert matches_service._get_cached_analysis(
+        key,
+        now=kickoff - timedelta(minutes=60),
+    ) is None
+
+
+def test_unconfirmed_analysis_inside_t60_uses_five_minute_ttl(monkeypatch) -> None:
+    kickoff = datetime(2026, 8, 20, 20, 0, tzinfo=timezone.utc)
+    analysis = matches_service._quick_analysis(_indexed_match(kickoff))
+    key = (analysis.match.id, False)
+    clock = [399.0]
+    monkeypatch.setattr(matches_service.time, "monotonic", lambda: clock[0])
+    matches_service._analysis_cache[key] = (100.0, analysis)
+    inside_window = kickoff - timedelta(minutes=30)
+
+    assert matches_service._get_cached_analysis(key, now=inside_window) is analysis
+    clock[0] = 401.0
+    assert matches_service._get_cached_analysis(key, now=inside_window) is None
+
+
+def test_assistant_context_reuses_cached_analysis_without_quick_rebuild(monkeypatch) -> None:
+    match = _indexed_match(datetime.now(timezone.utc) + timedelta(hours=4))
+    analysis = matches_service._quick_analysis(match)
+    matches_service._analysis_cache[(match.id, True)] = (time.monotonic(), analysis)
+    monkeypatch.setattr(
+        matches_service,
+        "_quick_analysis",
+        lambda match: pytest.fail("No debe reconstruir un análisis que ya está en caché"),
+    )
+
+    assert matches_service.get_assistant_analysis_context(match.id) is analysis
+
+
+def test_assistant_context_builds_local_analysis_only_from_match_index(monkeypatch) -> None:
+    match = _indexed_match(datetime.now(timezone.utc) + timedelta(hours=4))
+    matches_service._fixture_by_id[match.id] = (time.monotonic(), match)
+    monkeypatch.setattr(
+        matches_service,
+        "get_match",
+        lambda match_id: pytest.fail("El asistente no debe resolver el partido externamente"),
+    )
+    monkeypatch.setattr(
+        matches_service,
+        "_active_provider",
+        lambda: pytest.fail("El asistente no debe consultar un proveedor"),
+    )
+
+    context = matches_service.get_assistant_analysis_context(match.id)
+
+    assert context is not None
+    assert context.match.id == match.id
+
+
+def test_assistant_context_returns_none_without_cached_or_indexed_match() -> None:
+    assert matches_service.get_assistant_analysis_context("api-football-missing") is None
+    assert matches_service.get_assistant_analysis_context(None) is None
 
 
 def test_real_analysis_does_not_fill_missing_histories_with_demo_data(monkeypatch) -> None:
@@ -129,7 +254,7 @@ def test_real_analysis_does_not_fill_missing_histories_with_demo_data(monkeypatc
     monkeypatch.setattr(provider, "get_head_to_head", lambda *args, **kwargs: [])
     monkeypatch.setattr(provider, "get_team_last_matches", lambda *args, **kwargs: [])
 
-    analysis = matches_service.get_analysis(match.id, use_openai=False)
+    analysis = matches_service.get_analysis(match.id, use_external_ai=False)
 
     assert analysis is not None
     assert analysis.h2h_matches == []
@@ -146,7 +271,7 @@ def test_mock_analysis_exposes_three_visibly_demo_history_sections(monkeypatch) 
     monkeypatch.setattr(matches_service, "_active_provider", lambda: matches_service.mock_provider)
     monkeypatch.setattr(matches_service, "get_match", lambda match_id: match)
 
-    analysis = matches_service.get_analysis(match.id, use_openai=False)
+    analysis = matches_service.get_analysis(match.id, use_external_ai=False)
 
     assert analysis is not None
     assert len(analysis.h2h_matches) == 5

@@ -19,14 +19,59 @@ class Settings(BaseSettings):
     next_public_api_url: str = "https://bet-anality.onrender.com/api/v1"
 
 
-    # OpenAI
-    openai_api_key: str = ""
+    # Motor multi-IA. Las consultas simples rotan un proveedor; el análisis
+    # puede contrastar dos en paralelo dentro del mismo presupuesto total.
+    ai_enabled: bool = True
 
-    openai_model: str = "gpt-4o-mini"
+    # El modo gratuito excluye proveedores con cobro por token incluso si se
+    # configuró accidentalmente una clave. Requiere opt-in explícito.
+    ai_allow_paid_providers: bool = False
 
-    openai_timeout_seconds: int = 5
+    ai_provider_timeout_seconds: int = 4
 
-    openai_max_retries: int = 0
+    ai_total_timeout_seconds: int = 5
+
+    ai_max_provider_attempts: int = 3
+
+    # xAI / Grok
+    xai_api_key: str = ""
+
+    xai_base_url: str = "https://api.x.ai/v1"
+
+    xai_model: str = "grok-4.3"
+
+    # DeepSeek
+    deepseek_api_key: str = ""
+
+    deepseek_base_url: str = "https://api.deepseek.com"
+
+    deepseek_model: str = "deepseek-v4-flash"
+
+    # Cerebras Inference
+    cerebras_api_key: str = ""
+
+    cerebras_base_url: str = "https://api.cerebras.ai/v1"
+
+    cerebras_model: str = "gpt-oss-120b"
+
+    # GitHub Models cerró su servicio de inferencia el 30-07-2026. Se
+    # conservan estos campos solo para diagnosticar configuraciones antiguas;
+    # el orquestador nunca enviará tráfico a ese endpoint retirado.
+    github_models_token: str = ""
+
+    github_models_base_url: str = "https://models.github.ai/inference"
+
+    github_models_model: str = "retired"
+
+    # OpenRouter: el router `openrouter/free` limita el tráfico a modelos sin
+    # costo, sujeto a su disponibilidad y cuotas diarias.
+    openrouter_api_key: str = ""
+
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    openrouter_model: str = "openrouter/free"
+
+    openrouter_site_url: str = "https://bet-anality-1.onrender.com"
 
 
     # API-SPORTS / API-Football
@@ -49,7 +94,8 @@ class Settings(BaseSettings):
     football_data_timeout_seconds: int = 2
 
     @field_validator(
-        "openai_timeout_seconds",
+        "ai_provider_timeout_seconds",
+        "ai_total_timeout_seconds",
         "api_football_timeout_seconds",
         "football_data_timeout_seconds",
         mode="before",
@@ -61,7 +107,9 @@ class Settings(BaseSettings):
             parsed = int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             parsed = 5
-        if info.field_name == "openai_timeout_seconds":
+        if info.field_name == "ai_provider_timeout_seconds":
+            maximum = 5
+        elif info.field_name == "ai_total_timeout_seconds":
             maximum = 5
         elif info.field_name == "api_football_timeout_seconds":
             # API-SPORTS can be slightly slower from Render. Detail calls run
@@ -71,23 +119,36 @@ class Settings(BaseSettings):
             maximum = 2
         return max(1, min(parsed, maximum))
 
-    @field_validator("openai_max_retries", mode="before")
+    @field_validator("ai_max_provider_attempts", mode="before")
     @classmethod
-    def disable_interactive_retries(cls, value: object) -> int:
-        # A retry can multiply the visible wait even when each call has a timeout.
-        return 0
+    def clamp_provider_attempts(cls, value: object) -> int:
+        try:
+            parsed = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            parsed = 3
+        return max(1, min(parsed, 5))
 
-    @field_validator("openai_api_key", "api_football_key", "football_data_api_token")
+    @field_validator(
+        "xai_api_key",
+        "deepseek_api_key",
+        "cerebras_api_key",
+        "github_models_token",
+        "openrouter_api_key",
+        "api_football_key",
+        "football_data_api_token",
+    )
     @classmethod
-    def ignore_example_credentials(cls, value: str) -> str:
+    def ignore_example_credentials(cls, value: str, info: ValidationInfo) -> str:
         clean_value = value.strip()
-        if clean_value.casefold() in {
-            "openai_api_key",
+        placeholders = {
+            info.field_name.casefold(),
+            f"your_{info.field_name}_here",
+            f"tu_{info.field_name}_aqui",
             "your_api_football_key_here",
             "your_football_data_token_here",
-            "tu_openai_api_key_aqui",
             "tu_football_data_token_aqui",
-        }:
+        }
+        if clean_value.casefold() in placeholders:
             return ""
         return clean_value
 

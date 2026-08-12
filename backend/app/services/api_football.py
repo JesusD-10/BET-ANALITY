@@ -253,9 +253,12 @@ class APIFootballProvider:
         still useful and is returned unchanged.
         """
         bounded_limit = max(1, min(limit, 5))
-        data = self._request("fixtures", params={"team": team_id, "last": str(bounded_limit)})
+        data = self._request(
+            "fixtures",
+            params={"team": team_id, "last": str(bounded_limit), "status": "FT-AET-PEN"},
+        )
         raw_items = sorted(
-            data.get("response", []),
+            [item for item in data.get("response", []) if self._is_completed_fixture(item)],
             key=lambda item: str((item.get("fixture") or {}).get("date") or ""),
             reverse=True,
         )[:bounded_limit]
@@ -263,6 +266,25 @@ class APIFootballProvider:
         if not enrich:
             return raw_items
         return self.enrich_fixture_histories(raw_items)[0]
+
+    @staticmethod
+    def _is_completed_fixture(item: dict) -> bool:
+        """Keep only played fixtures in form history.
+
+        API-Football applies the requested status filter. The score fallback
+        keeps the adapter resilient to older/cached payloads without a status
+        block while still excluding unplayed fixtures.
+        """
+
+        status = str(((item.get("fixture") or {}).get("status") or {}).get("short") or "").upper()
+        if status:
+            return status in {"FT", "AET", "PEN"}
+        goals = item.get("goals") or {}
+        if goals.get("home") is not None and goals.get("away") is not None:
+            return True
+        # Compatibility for detailed/cached completed-fixture payloads that
+        # predate the status field in this adapter's tests or local cache.
+        return bool(item.get("statistics") or item.get("players"))
 
     def enrich_fixture_histories(
         self,
@@ -274,7 +296,11 @@ class APIFootballProvider:
         for history in histories:
             for item in history:
                 fixture_id = (item.get("fixture") or {}).get("id")
-                needs_enrichment = not item.get("statistics") or not item.get("players")
+                needs_enrichment = (
+                    not item.get("statistics")
+                    or not item.get("players")
+                    or not item.get("lineups")
+                )
                 if fixture_id is not None and needs_enrichment:
                     clean_id = str(fixture_id)
                     if clean_id not in fixture_ids:
@@ -440,11 +466,23 @@ class APIFootballProvider:
             normalized["player_statistics"] = canonical_players
         return normalized
 
-    def get_head_to_head(self, team1_id: str, team2_id: str, limit: int = 10) -> list[H2HMatchItem]:
+    def get_head_to_head(self, team1_id: str, team2_id: str, limit: int = 5) -> list[H2HMatchItem]:
         h2h_param = f"{team1_id}-{team2_id}"
-        bounded_limit = max(1, min(limit, 10))
-        data = self._request("fixtures/headtohead", params={"h2h": h2h_param, "last": str(bounded_limit)})
-        return self.normalize_history(data.get("response", []), bounded_limit)
+        bounded_limit = max(1, min(limit, 5))
+        data = self._request(
+            "fixtures/headtohead",
+            params={
+                "h2h": h2h_param,
+                "last": str(bounded_limit),
+                "status": "FT-AET-PEN",
+            },
+        )
+        completed = [
+            item
+            for item in data.get("response", [])
+            if self._is_completed_fixture(item)
+        ]
+        return self.normalize_history(completed, bounded_limit)
 
     @staticmethod
     def _history_item(item: dict) -> H2HMatchItem | None:
@@ -518,7 +556,13 @@ class APIFootballProvider:
         response_list = data.get("response", [])
 
         if not response_list:
-            return LineupsSummary(confirmed=False, home=None, away=None)
+            return LineupsSummary(
+                confirmed=False,
+                home=None,
+                away=None,
+                status="pending",
+                note="API-Football todavía no publicó los once iniciales.",
+            )
 
         home_lineup: TeamLineup | None = None
         away_lineup: TeamLineup | None = None
@@ -527,39 +571,7 @@ class APIFootballProvider:
         for idx, item in enumerate(response_list):
             team_data = item.get("team") or {}
             team_id = str(team_data["id"]) if team_data.get("id") is not None else None
-            team_name = team_data.get("name", f"Equipo {idx+1}")
-            formation = item.get("formation")
-            coach = item.get("coach", {}).get("name")
-
-            start_xi = [
-                PlayerLineup(
-                    id=p.get("player", {}).get("id"),
-                    name=p.get("player", {}).get("name", "Jugador"),
-                    number=p.get("player", {}).get("number"),
-                    pos=p.get("player", {}).get("pos"),
-                    grid=p.get("player", {}).get("grid"),
-                )
-                for p in item.get("startXI", [])
-            ]
-
-            substitutes = [
-                PlayerLineup(
-                    id=p.get("player", {}).get("id"),
-                    name=p.get("player", {}).get("name", "Jugador"),
-                    number=p.get("player", {}).get("number"),
-                    pos=p.get("player", {}).get("pos"),
-                    grid=p.get("player", {}).get("grid"),
-                )
-                for p in item.get("substitutes", [])
-            ]
-
-            t_lineup = TeamLineup(
-                team_name=team_name,
-                formation=formation,
-                coach=coach,
-                start_xi=start_xi,
-                substitutes=substitutes,
-            )
+            t_lineup = self._parse_team_lineup(item, idx, source="api_football")
 
             if home_team_id is not None and team_id == str(home_team_id):
                 home_lineup = t_lineup
@@ -575,7 +587,232 @@ class APIFootballProvider:
         if away_lineup is None and unmatched_lineups:
             away_lineup = unmatched_lineups.pop(0)
 
-        return LineupsSummary(confirmed=True, home=home_lineup, away=away_lineup)
+        fully_confirmed = bool(
+            home_lineup
+            and home_lineup.confirmed
+            and away_lineup
+            and away_lineup.confirmed
+        )
+        partially_confirmed = bool(
+            (home_lineup and home_lineup.confirmed)
+            or (away_lineup and away_lineup.confirmed)
+        )
+        return LineupsSummary(
+            confirmed=fully_confirmed,
+            home=home_lineup,
+            away=away_lineup,
+            status="confirmed" if fully_confirmed else "partial" if partially_confirmed else "pending",
+            note=(
+                "Alineaciones confirmadas por API-Football."
+                if fully_confirmed
+                else "Solo se considera confirmado un equipo con formación y once titulares completos."
+            ),
+        )
+
+    @staticmethod
+    def _parse_player(raw_player: dict) -> PlayerLineup | None:
+        player = raw_player.get("player") or {}
+        name = str(player.get("name") or "").strip()
+        if not name:
+            return None
+        return PlayerLineup(
+            id=player.get("id"),
+            name=name,
+            number=player.get("number"),
+            pos=player.get("pos"),
+            grid=player.get("grid"),
+        )
+
+    @classmethod
+    def _parse_team_lineup(
+        cls,
+        item: dict,
+        index: int = 0,
+        *,
+        source: str,
+        sample_size: int | None = None,
+    ) -> TeamLineup:
+        team_data = item.get("team") or {}
+        team_name = str(team_data.get("name") or f"Equipo {index + 1}")
+        formation = str(item.get("formation") or "").strip() or None
+        coach = str((item.get("coach") or {}).get("name") or "").strip() or None
+        start_xi = [
+            player
+            for raw_player in item.get("startXI") or []
+            if isinstance(raw_player, dict) and (player := cls._parse_player(raw_player)) is not None
+        ]
+        substitutes = [
+            player
+            for raw_player in item.get("substitutes") or []
+            if isinstance(raw_player, dict) and (player := cls._parse_player(raw_player)) is not None
+        ]
+        unique_starters = {
+            f"id:{player.id}" if player.id is not None else f"name:{player.name.casefold()}"
+            for player in start_xi
+        }
+        confirmed = (
+            source == "api_football"
+            and formation is not None
+            and len(start_xi) == 11
+            and len(unique_starters) == 11
+        )
+        return TeamLineup(
+            team_name=team_name,
+            formation=formation,
+            coach=coach,
+            start_xi=start_xi,
+            substitutes=substitutes,
+            confirmed=confirmed,
+            source=source,
+            sample_size=sample_size,
+        )
+
+    @classmethod
+    def _probable_team_lineup(
+        cls,
+        history: list[dict],
+        team_id: str | None,
+        team_name: str,
+    ) -> TeamLineup | None:
+        """Estimate the usual XI from starts in the five most recent fixtures."""
+
+        normalized_team_id = str(team_id) if team_id is not None else None
+        normalized_team_name = team_name.strip().casefold()
+        formation_counts: dict[str, int] = {}
+        formation_recency: dict[str, int] = {}
+        player_counts: dict[str, int] = {}
+        player_recency: dict[str, int] = {}
+        players: dict[str, PlayerLineup] = {}
+        latest_coach: str | None = None
+        provider_team_name: str | None = None
+        sample_size = 0
+
+        for recency, fixture in enumerate(history[:5]):
+            fixture_lineups = fixture.get("lineups") or []
+            if not isinstance(fixture_lineups, list):
+                continue
+            matching_item: dict | None = None
+            for item in fixture_lineups:
+                if not isinstance(item, dict):
+                    continue
+                team = item.get("team") or {}
+                item_id = str(team.get("id")) if team.get("id") is not None else None
+                item_name = str(team.get("name") or "").strip().casefold()
+                if (normalized_team_id and item_id == normalized_team_id) or (
+                    normalized_team_name and item_name == normalized_team_name
+                ):
+                    matching_item = item
+                    break
+            if matching_item is None:
+                continue
+
+            parsed = cls._parse_team_lineup(matching_item, source="recent_form")
+            if not parsed.formation and not parsed.start_xi:
+                continue
+            sample_size += 1
+            provider_team_name = provider_team_name or parsed.team_name
+            latest_coach = latest_coach or parsed.coach
+            if parsed.formation:
+                formation_counts[parsed.formation] = formation_counts.get(parsed.formation, 0) + 1
+                formation_recency.setdefault(parsed.formation, recency)
+            for player in parsed.start_xi:
+                key = f"id:{player.id}" if player.id is not None else f"name:{player.name.casefold()}"
+                player_counts[key] = player_counts.get(key, 0) + 1
+                player_recency.setdefault(key, recency)
+                players.setdefault(key, player)
+
+        if sample_size == 0:
+            return None
+
+        formation = (
+            max(
+                formation_counts,
+                key=lambda value: (formation_counts[value], -formation_recency[value]),
+            )
+            if formation_counts
+            else None
+        )
+        ranked_player_keys = sorted(
+            players,
+            key=lambda key: (
+                -player_counts[key],
+                player_recency[key],
+                players[key].number is None,
+                players[key].number if players[key].number is not None else 999,
+                players[key].name.casefold(),
+            ),
+        )
+        probable_xi = [players[key] for key in ranked_player_keys[:11]]
+        return TeamLineup(
+            team_name=provider_team_name or team_name,
+            formation=formation,
+            coach=latest_coach,
+            start_xi=probable_xi,
+            substitutes=[],
+            confirmed=False,
+            source="recent_form",
+            sample_size=sample_size,
+        )
+
+    @classmethod
+    def get_probable_lineups(
+        cls,
+        home_history: list[dict],
+        away_history: list[dict],
+        *,
+        home_team_id: str | None,
+        away_team_id: str | None,
+        home_team_name: str,
+        away_team_name: str,
+    ) -> LineupsSummary:
+        home = cls._probable_team_lineup(home_history, home_team_id, home_team_name)
+        away = cls._probable_team_lineup(away_history, away_team_id, away_team_name)
+        has_estimate = home is not None or away is not None
+        return LineupsSummary(
+            confirmed=False,
+            home=home,
+            away=away,
+            status="probable" if has_estimate else "pending",
+            note=(
+                "Estimación basada en titulares y formaciones de los últimos cinco partidos disponibles."
+                if has_estimate
+                else "No hay suficiente historial de alineaciones para estimar el once habitual."
+            ),
+        )
+
+    @staticmethod
+    def merge_lineups(
+        published: LineupsSummary | None,
+        probable: LineupsSummary,
+    ) -> LineupsSummary:
+        """Prefer complete published XIs team by team, otherwise keep estimates."""
+
+        published_home = published.home if published else None
+        published_away = published.away if published else None
+        home = published_home if published_home and published_home.confirmed else probable.home or published_home
+        away = published_away if published_away and published_away.confirmed else probable.away or published_away
+        home_confirmed = bool(home and home.confirmed)
+        away_confirmed = bool(away and away.confirmed)
+        confirmed = home_confirmed and away_confirmed
+        if confirmed:
+            status = "confirmed"
+            note = "Alineaciones confirmadas por API-Football."
+        elif home_confirmed or away_confirmed:
+            status = "partial"
+            note = "Un equipo ya tiene XI confirmado; el otro se mantiene como probable o pendiente."
+        elif home or away:
+            status = "probable"
+            note = probable.note
+        else:
+            status = "pending"
+            note = probable.note
+        return LineupsSummary(
+            confirmed=confirmed,
+            home=home,
+            away=away,
+            status=status,
+            note=note,
+        )
 
     @staticmethod
     def _normalize_status(short_status: str) -> str:

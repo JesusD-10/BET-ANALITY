@@ -263,10 +263,13 @@ _FIXTURE_CACHE_TTL_SECONDS = 60
 _FIXTURE_STALE_TTL_SECONDS = 15 * 60
 _MATCH_INDEX_TTL_SECONDS = 12 * 60 * 60
 _PROVIDER_RETRY_COOLDOWN_SECONDS = 10
-# The official complementary resources update between one and fifteen minutes.
-# Reusing one analysis for ten minutes protects the API-Sports per-minute quota
-# and makes repeat detail visits immediate.
+# Most complementary resources can be reused for ten minutes. Published
+# lineups are different: a pre-window cache expires exactly when T-60 is
+# crossed, and an unconfirmed response inside that window is retried every five
+# minutes instead of on every page load.
 _ANALYSIS_CACHE_TTL_SECONDS = 10 * 60
+_UNCONFIRMED_LINEUP_CACHE_TTL_SECONDS = 5 * 60
+_LINEUP_REFRESH_WINDOW_AFTER_KICKOFF = timedelta(hours=3)
 _fixture_cache: dict[str, tuple[float, list[MatchSummary]]] = {}
 _fixture_by_id: dict[str, tuple[float, MatchSummary]] = {}
 _provider_retry_after: dict[str, float] = {}
@@ -297,6 +300,46 @@ def _cache_get(cache: dict, key: object, ttl: int):
 
 def _cache_set(cache: dict, key: object, value: object) -> None:
     cache[key] = (time.monotonic(), value)
+
+
+def _get_cached_analysis(
+    key: tuple[str, bool],
+    now: datetime | None = None,
+) -> MatchAnalysisResponse | None:
+    cached = _analysis_cache.get(key)
+    if cached is None:
+        return None
+
+    stored_at, analysis = cached
+    age_seconds = max(0.0, time.monotonic() - stored_at)
+    if age_seconds > _ANALYSIS_CACHE_TTL_SECONDS:
+        return None
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    kickoff = analysis.match.kickoff_at
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=timezone.utc)
+    lineup_window_start = kickoff - timedelta(minutes=60)
+    stored_wall_time = current - timedelta(seconds=age_seconds)
+
+    # A probable/pending result created before the publication window must not
+    # survive after T-60 merely because its generic ten-minute TTL is active.
+    if stored_wall_time < lineup_window_start <= current:
+        return None
+
+    lineups_confirmed = bool(analysis.lineups and analysis.lineups.confirmed)
+    lineup_refresh_window = (
+        lineup_window_start
+        <= current
+        <= kickoff + _LINEUP_REFRESH_WINDOW_AFTER_KICKOFF
+    )
+    if lineup_refresh_window and not lineups_confirmed:
+        if age_seconds > _UNCONFIRMED_LINEUP_CACHE_TTL_SECONDS:
+            return None
+
+    return analysis
 
 
 def _index_matches(matches: list[MatchSummary]) -> None:
@@ -466,6 +509,19 @@ def _future_value(future: Future | None, default):
         return default
 
 
+def _should_fetch_published_lineups(
+    match: MatchSummary,
+    now: datetime | None = None,
+) -> bool:
+    """Avoid spending quota before API-Football normally publishes lineups."""
+
+    current = now or datetime.now(timezone.utc)
+    kickoff = match.kickoff_at
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=timezone.utc)
+    return kickoff - current <= timedelta(minutes=60)
+
+
 def _apply_verified_market_odds(
     analysis: MatchAnalysisResponse,
     quotes: dict[str, BookmakerQuote],
@@ -557,14 +613,14 @@ def _mock_histories(match: MatchSummary) -> tuple[list[H2HMatchItem], list[H2HMa
     return h2h, team_history(match.home_team, 0), team_history(match.away_team, 1)
 
 
-def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisResponse | None:
+def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisResponse | None:
     analysis_started_at = time.monotonic()
-    cache_key = (match_id, use_openai)
-    cached = _cache_get(_analysis_cache, cache_key, _ANALYSIS_CACHE_TTL_SECONDS)
+    cache_key = (match_id, use_external_ai)
+    cached = _get_cached_analysis(cache_key)
     if cached is not None:
         return cached
-    if not use_openai:
-        enriched_cached = _cache_get(_analysis_cache, (match_id, True), _ANALYSIS_CACHE_TTL_SECONDS)
+    if not use_external_ai:
+        enriched_cached = _get_cached_analysis((match_id, True))
         if enriched_cached is not None:
             return enriched_cached
 
@@ -587,18 +643,22 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
         fixture_id = match.external_id or match.id.replace("api-football-", "")
         with ThreadPoolExecutor(max_workers=6) as executor:
             injuries_future = executor.submit(provider.get_fixture_injuries, fixture_id)
-            lineups_future = executor.submit(
-                provider.get_fixture_lineups,
-                fixture_id,
-                match.home_team_id,
-                match.away_team_id,
+            lineups_future = (
+                executor.submit(
+                    provider.get_fixture_lineups,
+                    fixture_id,
+                    match.home_team_id,
+                    match.away_team_id,
+                )
+                if _should_fetch_published_lineups(match)
+                else None
             )
             odds_future = executor.submit(provider.get_fixture_odds, fixture_id)
             h2h_future = None
             home_future = None
             away_future = None
             if match.home_team_id and match.away_team_id:
-                h2h_future = executor.submit(provider.get_head_to_head, match.home_team_id, match.away_team_id, 10)
+                h2h_future = executor.submit(provider.get_head_to_head, match.home_team_id, match.away_team_id, 5)
                 home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 5, False)
                 away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 5, False)
 
@@ -614,6 +674,15 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
             )
             home_recent_matches = provider.normalize_history(home_history, 5)
             away_recent_matches = provider.normalize_history(away_history, 5)
+            probable_lineups = provider.get_probable_lineups(
+                home_history,
+                away_history,
+                home_team_id=match.home_team_id,
+                away_team_id=match.away_team_id,
+                home_team_name=match.home_team,
+                away_team_name=match.away_team,
+            )
+            lineups = provider.merge_lineups(lineups, probable_lineups)
 
     elif isinstance(provider, FootballDataProvider) and match.id.startswith("football-data-"):
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -660,7 +729,7 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
 
     # Leave enough of the 10-second browser budget for serialization/network.
     # When sports data was slow, the deterministic model answers immediately.
-    openai_has_budget = time.monotonic() - analysis_started_at < 4.5
+    external_ai_has_budget = time.monotonic() - analysis_started_at < 4.5
     analysis = analyze_match_with_ai(
         match=match,
         referee_info=referee_info,
@@ -669,7 +738,7 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
         h2h_matches=h2h_matches,
         home_last_matches=home_history,
         away_last_matches=away_history,
-        allow_openai=use_openai and openai_has_budget,
+        allow_external_ai=use_external_ai and external_ai_has_budget,
     )
     analysis = _apply_verified_market_odds(analysis, odds_quotes)
     analysis.home_recent_matches = home_recent_matches[:5]
@@ -679,11 +748,31 @@ def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisRespons
 
 
 def _quick_analysis(match: MatchSummary) -> MatchAnalysisResponse:
-    return analyze_match_with_ai(match=match, allow_openai=False)
+    return analyze_match_with_ai(match=match, allow_external_ai=False)
+
+
+def get_assistant_analysis_context(match_id: str | None) -> MatchAnalysisResponse | None:
+    """Return assistant context without resolving any external sports data.
+
+    A previously computed analysis is preferred. If none is cached, an already
+    indexed fixture can still produce the deterministic local analysis. This
+    helper deliberately never calls ``get_match`` or an upstream provider.
+    """
+
+    if not match_id:
+        return None
+    for cache_key in ((match_id, True), (match_id, False)):
+        cached = _get_cached_analysis(cache_key)
+        if cached is not None:
+            return cached
+    indexed_match = _cache_get(_fixture_by_id, match_id, _MATCH_INDEX_TTL_SECONDS)
+    if indexed_match is None:
+        return None
+    return _quick_analysis(indexed_match)
 
 
 def get_recommendations(limit: int | None = None) -> list[Recommendation]:
-    """Build the daily simple list without N OpenAI/provider detail calls."""
+    """Build the daily simple list without N external AI detail calls."""
     result: list[Recommendation] = []
     for match in get_highlights():
         analysis_data = _quick_analysis(match)

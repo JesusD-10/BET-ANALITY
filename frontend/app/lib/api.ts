@@ -98,12 +98,17 @@ export type TeamLineup = {
   coach?: string | null;
   start_xi: PlayerLineup[];
   substitutes: PlayerLineup[];
+  confirmed?: boolean;
+  source?: "api_football" | "recent_form" | string;
+  sample_size?: number | null;
 };
 
 export type LineupsSummary = {
   confirmed: boolean;
   home?: TeamLineup | null;
   away?: TeamLineup | null;
+  status?: "confirmed" | "partial" | "probable" | "pending" | string;
+  note?: string | null;
 };
 
 export type H2HMatch = {

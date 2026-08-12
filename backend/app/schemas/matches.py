@@ -31,14 +31,19 @@ class TeamLineup(BaseModel):
     team_name: str
     formation: str | None = None
     coach: str | None = None
-    start_xi: list[PlayerLineup] = []
-    substitutes: list[PlayerLineup] = []
+    start_xi: list[PlayerLineup] = Field(default_factory=list)
+    substitutes: list[PlayerLineup] = Field(default_factory=list)
+    confirmed: bool = False
+    source: str = "recent_form"
+    sample_size: int | None = None
 
 
 class LineupsSummary(BaseModel):
     confirmed: bool = False
     home: TeamLineup | None = None
     away: TeamLineup | None = None
+    status: str = "pending"
+    note: str | None = None
 
 
 class H2HMatchItem(BaseModel):

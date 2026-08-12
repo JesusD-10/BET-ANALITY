@@ -26,6 +26,7 @@ import {
   getAnalysis,
   isAbortError,
   type Analysis,
+  type TeamLineup,
 } from "../../lib/api";
 
 type DetailTab = "summary" | "combinations" | "dream" | "injuries" | "lineups" | "h2h" | "assistant";
@@ -40,6 +41,17 @@ const detailTabs: Array<{ id: DetailTab; label: string }> = [
   { id: "h2h", label: "H2H" },
   { id: "assistant", label: "Asistente" },
 ];
+
+function lineupEvidence(lineup: TeamLineup): string {
+  if (lineup.confirmed) return "XI confirmado por el proveedor";
+  if (lineup.source === "recent_form") {
+    const sample = lineup.sample_size ?? 0;
+    return sample > 0
+      ? `Alineación probable · basada en ${sample} partido${sample === 1 ? "" : "s"} reciente${sample === 1 ? "" : "s"}`
+      : "Alineación probable según el historial disponible";
+  }
+  return "Publicación parcial del proveedor · aún no confirmada";
+}
 
 export default function MatchDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -191,7 +203,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       ? `Todavía no hay últimos partidos disponibles de ${match.home_team}.`
       : `Todavía no hay últimos partidos disponibles de ${match.away_team}.`;
   const h2hTabs: Array<{ id: H2HTab; label: string }> = [
-    { id: "meetings", label: "Enfrentamientos" },
+    { id: "meetings", label: "Últimos 5 enfrentamientos" },
     { id: "home", label: `Últimos 5 ${match.home_team}` },
     { id: "away", label: `Últimos 5 ${match.away_team}` },
   ];
@@ -413,9 +425,16 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "1rem", color: "#10b981" }}>
           <Users size={22} />
           <h2 style={{ margin: 0, fontSize: "1.4rem" }}>
-            Alineaciones {lineups?.confirmed ? "(Confirmadas)" : "(Probables / Pendientes)"}
+            Alineaciones {lineups?.status === "confirmed"
+              ? "(Confirmadas)"
+              : lineups?.status === "partial"
+                ? "(Confirmación parcial)"
+                : lineups?.status === "probable"
+                  ? "(Probables)"
+                  : "(Pendientes)"}
           </h2>
         </div>
+        {lineups?.note && <p style={{ opacity: 0.82, marginTop: 0 }}>{lineups.note}</p>}
         {lineups?.home || lineups?.away ? (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "1.5rem" }}>
             {lineups.home && (
@@ -424,6 +443,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                   {lineups.home.team_name} {lineups.home.formation && `(${lineups.home.formation})`}
                 </h3>
                 {lineups.home.coach && <small style={{ display: "block", marginBottom: "0.6rem" }}>DT: {lineups.home.coach}</small>}
+                <small style={{ display: "block", marginBottom: "0.6rem", opacity: 0.75 }}>{lineupEvidence(lineups.home)}</small>
                 <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "0.9rem" }}>
                   {lineups.home.start_xi.map((p, i) => (
                     <li key={i} style={{ padding: "0.25rem 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
@@ -439,6 +459,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                   {lineups.away.team_name} {lineups.away.formation && `(${lineups.away.formation})`}
                 </h3>
                 {lineups.away.coach && <small style={{ display: "block", marginBottom: "0.6rem" }}>DT: {lineups.away.coach}</small>}
+                <small style={{ display: "block", marginBottom: "0.6rem", opacity: 0.75 }}>{lineupEvidence(lineups.away)}</small>
                 <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "0.9rem" }}>
                   {lineups.away.start_xi.map((p, i) => (
                     <li key={i} style={{ padding: "0.25rem 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
@@ -450,7 +471,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
             )}
           </div>
         ) : (
-          <p style={{ opacity: 0.8 }}>Las alineaciones se confirmarán aproximadamente 60 minutos antes del inicio del encuentro.</p>
+          <p style={{ opacity: 0.8 }}>Todavía no hay historial suficiente para una alineación probable. Los once reales solo aparecerán cuando el proveedor los publique, normalmente cerca de 60 minutos antes.</p>
         )}
       </section>
       )}
@@ -505,7 +526,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
           <div className="empty-state">{historyEmptyMessage}</div>
         ) : (
           <div className="history-match-list">
-            {selectedHistory.slice(0, activeH2HTab === "meetings" ? 10 : 5).map((historyMatch, idx) => (
+            {selectedHistory.slice(0, 5).map((historyMatch, idx) => (
               <div className="history-match-row" key={`${historyMatch.date}-${historyMatch.home_team}-${historyMatch.away_team}-${idx}`}>
                 <span>
                   <small>{historyMatch.date}</small>
@@ -520,11 +541,11 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       </section>
       )}
 
-      {/* ASISTENTE OPENAI INTERACTIVO */}
+      {/* ASISTENTE MULTI-IA INTERACTIVO */}
       {activeTab === "assistant" && (
       <section className="detail-tab-panel assistant-section" id="detail-panel-assistant" role="tabpanel" aria-labelledby="detail-tab-assistant" tabIndex={0}>
         <div>
-          <p className="section-kicker">OPENAI · ANÁLISIS EN TIEMPO REAL</p>
+          <p className="section-kicker">MOTOR MULTI-IA · ANÁLISIS EN TIEMPO REAL</p>
           <h2>Consulta al Asistente IA del Partido</h2>
           <p>Pregunta sobre tácticas, ausencias de jugadores o valor en mercados de este encuentro.</p>
         </div>

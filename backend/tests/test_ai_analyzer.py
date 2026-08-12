@@ -2,16 +2,17 @@ from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 
-import openai
+import pytest
 
-from app.core.config import settings
 from app.schemas.matches import MatchSummary, RefereeInfo, InjuryItem, H2HMatchItem
 from app.services.ai_analyzer import (
     _available_market_families,
+    _consensus_market_payloads,
     _format_recent_history,
     _generate_local_fallback_analysis,
     analyze_match_with_ai,
 )
+from app.services.ai_gateway import ai_gateway
 
 
 def test_local_fallback_analysis_returns_rich_context():
@@ -43,7 +44,7 @@ def test_local_fallback_analysis_returns_rich_context():
     assert analysis.markets[0].fair_odds > 1.0
 
 
-def test_openai_advanced_market_is_filtered_without_source_statistics(monkeypatch):
+def test_multi_ai_advanced_market_is_filtered_without_source_statistics(monkeypatch):
     match = MatchSummary(
         id="provider-1",
         competition="Liga",
@@ -86,22 +87,118 @@ def test_openai_advanced_market_is_filtered_without_source_statistics(monkeypatc
             ]
         }
     )
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+    completion = SimpleNamespace(
+        json_data=json.loads(content),
+        provider="cerebras",
+        model="gpt-oss-120b",
     )
-    fake_client = SimpleNamespace(
-        chat=SimpleNamespace(
-            completions=SimpleNamespace(create=lambda **_: response)
-        )
-    )
-    monkeypatch.setattr(openai, "OpenAI", lambda **_: fake_client)
-    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(ai_gateway, "is_available", lambda: True)
+    monkeypatch.setattr(ai_gateway, "complete_json_consensus", lambda **_: [completion])
 
     analysis = analyze_match_with_ai(match)
 
     assert [market.market_key for market in analysis.markets] == ["TOTAL_GOALS_OVER_2_5"]
     assert analysis.markets[0].best_odds is None
     assert analysis.markets[0].expected_value is None
+    assert analysis.model_version == "multi-ai-cerebras-gpt-oss-120b"
+
+
+def test_consensus_averages_probabilities_and_backend_recalculates_fair_odds(monkeypatch):
+    match = MatchSummary(
+        id="consensus-1",
+        competition="Liga",
+        kickoff_at=datetime.now(timezone.utc),
+        home_team="Local",
+        away_team="Visitante",
+        data_quality=0.8,
+        odds_available=False,
+        status="PROGRAMADO",
+    )
+    first = SimpleNamespace(
+        json_data={
+            "markets": [
+                {
+                    "market_key": "TOTAL_GOALS_OVER_2_5",
+                    "label": "Goles",
+                    "selection": "Más de 2.5",
+                    "probability": 0.60,
+                    "fair_odds": 99.0,
+                    "confidence": "Media",
+                    "data_quality": 0.8,
+                    "factors_for": ["Forma"],
+                    "risks": ["Varianza"],
+                }
+            ],
+            "notes": [],
+        },
+        provider="cerebras",
+        model="gpt-oss-120b",
+    )
+    second = SimpleNamespace(
+        json_data={
+            "markets": [
+                {
+                    "market_key": "TOTAL_GOALS_OVER_2_5",
+                    "label": "Total goles",
+                    "selection": "más de 2.5",
+                    "probability": 0.70,
+                    "fair_odds": 1.01,
+                    "confidence": "Alta",
+                    "data_quality": 0.8,
+                    "factors_for": ["Historial"],
+                    "risks": ["Ritmo"],
+                }
+            ]
+        },
+        provider="openrouter",
+        model="openrouter/free",
+    )
+    monkeypatch.setattr(ai_gateway, "is_available", lambda: True)
+    monkeypatch.setattr(
+        ai_gateway,
+        "complete_json_consensus",
+        lambda **_: [first, second],
+    )
+
+    analysis = analyze_match_with_ai(match)
+
+    assert analysis.markets[0].probability == pytest.approx(0.65)
+    assert analysis.markets[0].fair_odds == 1.54
+    assert analysis.markets[0].best_odds is None
+    assert analysis.model_version == "multi-ai-consensus-cerebras+openrouter"
+    assert any("mismo peso" in note for note in analysis.notes)
+
+
+def test_consensus_does_not_average_opposing_selections() -> None:
+    completions = [
+        SimpleNamespace(
+            json_data={
+                "markets": [
+                    {
+                        "market_key": "BOTH_TEAMS_TO_SCORE",
+                        "selection": "Sí",
+                        "probability": 0.62,
+                    }
+                ]
+            }
+        ),
+        SimpleNamespace(
+            json_data={
+                "markets": [
+                    {
+                        "market_key": "BOTH_TEAMS_TO_SCORE",
+                        "selection": "No",
+                        "probability": 0.38,
+                    }
+                ]
+            }
+        ),
+    ]
+
+    markets = _consensus_market_payloads(completions, {"result", "goals"})
+
+    assert markets[0]["selection"] == "Sí"
+    assert markets[0]["probability"] == 0.62
 
 
 def test_advanced_families_activate_only_from_explicit_statistics():

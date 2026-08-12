@@ -1,8 +1,6 @@
 from datetime import date, datetime, timezone
 from unittest.mock import MagicMock
 
-import openai
-
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings, settings
@@ -20,6 +18,7 @@ from app.services.matches import (
     _fixture_cache,
 )
 from app.services.ai_analyzer import analyze_match_with_ai
+from app.services.ai_gateway import ai_gateway
 from app.services.opportunities import (
     MARKET_TAXONOMY,
     build_combinations,
@@ -69,47 +68,43 @@ def _advanced_market(
 
 
 def test_external_timeouts_stay_inside_interactive_budget() -> None:
-    assert settings.openai_timeout_seconds <= 5
+    assert settings.ai_provider_timeout_seconds <= 5
+    assert settings.ai_total_timeout_seconds <= 5
     assert settings.api_football_timeout_seconds <= 3
     assert settings.football_data_timeout_seconds <= 2
-    assert settings.openai_max_retries == 0
+    assert settings.ai_max_provider_attempts <= 5
 
 
 def test_settings_clamp_slow_values_and_ignore_placeholders() -> None:
     configured = Settings(
         _env_file=None,
-        openai_timeout_seconds=30,
+        ai_provider_timeout_seconds=30,
+        ai_total_timeout_seconds=30,
         api_football_timeout_seconds=30,
         football_data_timeout_seconds=30,
-        openai_max_retries=5,
-        openai_api_key="OPENAI_API_KEY",
+        ai_max_provider_attempts=30,
+        xai_api_key="XAI_API_KEY",
         api_football_key="your_api_football_key_here",
     )
 
-    assert configured.openai_timeout_seconds == 5
+    assert configured.ai_provider_timeout_seconds == 5
+    assert configured.ai_total_timeout_seconds == 5
     assert configured.api_football_timeout_seconds == 3
     assert configured.football_data_timeout_seconds == 2
-    assert configured.openai_max_retries == 0
-    assert configured.openai_api_key == ""
+    assert configured.ai_max_provider_attempts == 5
+    assert configured.xai_api_key == ""
     assert configured.api_football_key == ""
 
 
-def test_openai_timeout_falls_back_after_one_attempt(monkeypatch) -> None:
-    fake_client = MagicMock()
-    fake_client.chat.completions.create.side_effect = TimeoutError("slow model")
-    client_factory = MagicMock(return_value=fake_client)
-    monkeypatch.setattr(openai, "OpenAI", client_factory)
-    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+def test_multi_ai_timeout_uses_local_fallback(monkeypatch) -> None:
+    completion = MagicMock(side_effect=TimeoutError("slow model"))
+    monkeypatch.setattr(ai_gateway, "is_available", lambda: True)
+    monkeypatch.setattr(ai_gateway, "complete_json_consensus", completion)
 
     analysis = analyze_match_with_ai(_match())
 
     assert analysis.model_version == "baseline-poisson-v0.3"
-    assert fake_client.chat.completions.create.call_count == 1
-    client_factory.assert_called_once_with(
-        api_key="test-key",
-        timeout=settings.openai_timeout_seconds,
-        max_retries=0,
-    )
+    assert completion.call_count == 1
 
 
 def test_match_builders_include_high_probability_goal_and_cards() -> None:
@@ -372,7 +367,7 @@ def test_cards_are_omitted_from_generated_builders_without_referee_metrics() -> 
 def test_analysis_contract_exposes_combinations_and_match_dreams(monkeypatch) -> None:
     monkeypatch.setattr(settings, "api_football_key", "")
     monkeypatch.setattr(settings, "football_data_api_token", "")
-    monkeypatch.setattr(settings, "openai_api_key", "")
+    monkeypatch.setattr(ai_gateway, "is_available", lambda: False)
     _fixture_cache.clear()
     _analysis_cache.clear()
 
@@ -388,7 +383,7 @@ def test_analysis_contract_exposes_combinations_and_match_dreams(monkeypatch) ->
 def test_daily_dreams_are_diversified_and_respect_limit(monkeypatch) -> None:
     monkeypatch.setattr(settings, "api_football_key", "")
     monkeypatch.setattr(settings, "football_data_api_token", "")
-    monkeypatch.setattr(settings, "openai_api_key", "")
+    monkeypatch.setattr(ai_gateway, "is_available", lambda: False)
     _fixture_cache.clear()
     _analysis_cache.clear()
 

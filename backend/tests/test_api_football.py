@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 from datetime import date
 
 from app.services.api_football import APIFootballAPIError, APIFootballProvider
-from app.schemas.matches import LineupsSummary, H2HMatchItem, InjuryItem
+from app.schemas.matches import H2HMatchItem, InjuryItem, LineupsSummary, PlayerLineup, TeamLineup
 
 
 def test_api_football_headers():
@@ -168,6 +168,37 @@ def test_get_head_to_head(mock_get):
     assert len(h2h) == 1
     assert h2h[0].score == "2 - 0"
     assert h2h[0].winner == "Millonarios"
+    assert mock_get.call_args.kwargs["params"] == {
+        "h2h": "10-12",
+        "last": "5",
+        "status": "FT-AET-PEN",
+    }
+
+
+def test_head_to_head_excludes_unfinished_provider_rows(monkeypatch):
+    finished = {
+        "fixture": {"date": "2026-08-01T20:00:00+00:00", "status": {"short": "FT"}},
+        "league": {"name": "Liga"},
+        "teams": {"home": {"name": "A"}, "away": {"name": "B"}},
+        "goals": {"home": 2, "away": 1},
+    }
+    scheduled_with_placeholder_score = {
+        "fixture": {"date": "2026-09-01T20:00:00+00:00", "status": {"short": "NS"}},
+        "league": {"name": "Liga"},
+        "teams": {"home": {"name": "A"}, "away": {"name": "B"}},
+        "goals": {"home": 0, "away": 0},
+    }
+    provider = APIFootballProvider(key="dummy_key")
+    monkeypatch.setattr(
+        provider,
+        "_request",
+        lambda endpoint, params=None: {"response": [scheduled_with_placeholder_score, finished]},
+    )
+
+    history = provider.get_head_to_head("10", "12")
+
+    assert len(history) == 1
+    assert history[0].date == "2026-08-01"
 
 
 @patch("httpx.get")
@@ -229,10 +260,12 @@ def test_get_fixture_lineups_uses_exact_api_sports_endpoint(monkeypatch):
     lineups = provider.get_fixture_lineups("api-football-1001")
 
     assert calls == [("fixtures/lineups", {"fixture": "1001"})]
-    assert lineups.confirmed is True
+    assert lineups.confirmed is False
+    assert lineups.status == "pending"
     assert lineups.home is not None
     assert lineups.home.team_name == "Millonarios"
     assert lineups.home.start_xi[0].name == "Titular"
+    assert lineups.home.confirmed is False
     assert lineups.away is not None
     assert lineups.away.team_name == "Santa Fe"
 
@@ -256,6 +289,115 @@ def test_get_fixture_lineups_uses_team_ids_when_provider_order_is_reversed(monke
     assert lineups.home.team_name == "Local"
     assert lineups.away is not None
     assert lineups.away.team_name == "Visitante"
+
+
+def test_fixture_lineups_are_confirmed_only_with_formation_and_eleven_valid_starters(monkeypatch):
+    provider = APIFootballProvider(key="dummy_key")
+
+    def full_lineup(team_id: int, team_name: str) -> dict:
+        return {
+            "team": {"id": team_id, "name": team_name},
+            "formation": "4-3-3",
+            "startXI": [
+                {"player": {"id": team_id * 100 + index, "name": f"{team_name} {index}", "pos": "M"}}
+                for index in range(1, 12)
+            ],
+            "substitutes": [],
+        }
+
+    monkeypatch.setattr(
+        provider,
+        "_request",
+        lambda endpoint, params=None: {
+            "response": [full_lineup(10, "Local"), full_lineup(12, "Visitante")]
+        },
+    )
+
+    lineups = provider.get_fixture_lineups("1001", home_team_id="10", away_team_id="12")
+
+    assert lineups.confirmed is True
+    assert lineups.status == "confirmed"
+    assert lineups.home is not None and lineups.home.confirmed is True
+    assert lineups.away is not None and lineups.away.confirmed is True
+    assert len(lineups.home.start_xi) == 11
+
+
+def test_probable_lineup_uses_most_common_formation_and_regular_starters():
+    provider = APIFootballProvider(key="dummy_key")
+
+    def historical_lineup(formation: str, player_ids: list[int]) -> dict:
+        return {
+            "lineups": [
+                {
+                    "team": {"id": 10, "name": "Local"},
+                    "formation": formation,
+                    "coach": {"name": "DT habitual"},
+                    "startXI": [
+                        {
+                            "player": {
+                                "id": player_id,
+                                "name": f"Jugador {player_id}",
+                                "number": player_id,
+                                "pos": "M",
+                            }
+                        }
+                        for player_id in player_ids
+                    ],
+                }
+            ]
+        }
+
+    home_history = [
+        historical_lineup("4-3-3", list(range(1, 12))),
+        historical_lineup("4-4-2", list(range(1, 11)) + [20]),
+        historical_lineup("4-3-3", list(range(1, 12))),
+    ]
+
+    lineups = provider.get_probable_lineups(
+        home_history,
+        [],
+        home_team_id="10",
+        away_team_id="12",
+        home_team_name="Local",
+        away_team_name="Visitante",
+    )
+
+    assert lineups.confirmed is False
+    assert lineups.status == "probable"
+    assert lineups.home is not None
+    assert lineups.home.formation == "4-3-3"
+    assert lineups.home.sample_size == 3
+    assert lineups.home.source == "recent_form"
+    assert [player.id for player in lineups.home.start_xi] == list(range(1, 12))
+    assert lineups.away is None
+
+
+def test_merge_lineups_keeps_team_level_confirmation_and_probable_opponent():
+    provider = APIFootballProvider(key="dummy_key")
+    confirmed_home = TeamLineup(
+        team_name="Local",
+        formation="4-3-3",
+        start_xi=[PlayerLineup(name=f"Local {index}") for index in range(11)],
+        confirmed=True,
+        source="api_football",
+    )
+    probable_away = TeamLineup(
+        team_name="Visitante",
+        formation="4-4-2",
+        start_xi=[PlayerLineup(name=f"Visitante {index}") for index in range(11)],
+        source="recent_form",
+        sample_size=5,
+    )
+
+    merged = provider.merge_lineups(
+        LineupsSummary(home=confirmed_home, status="partial"),
+        LineupsSummary(away=probable_away, status="probable"),
+    )
+
+    assert merged.confirmed is False
+    assert merged.status == "partial"
+    assert merged.home is confirmed_home
+    assert merged.away is probable_away
 
 
 def test_recent_matches_use_one_batch_and_normalize_statistics(monkeypatch):
@@ -326,7 +468,7 @@ def test_recent_matches_use_one_batch_and_normalize_statistics(monkeypatch):
     history = provider.get_team_last_matches("10", limit=20)
 
     assert calls == [
-        ("fixtures", {"team": "10", "last": "5"}),
+        ("fixtures", {"team": "10", "last": "5", "status": "FT-AET-PEN"}),
         ("fixtures", {"ids": "1002-1001"}),
     ]
     assert [item["fixture"]["id"] for item in history] == [1002, 1001]
@@ -358,6 +500,7 @@ def test_recent_matches_skip_batch_when_base_is_already_enriched(monkeypatch):
     calls = []
     enriched = {
         "fixture": {"id": 1001, "date": "2026-08-01T20:00:00+00:00"},
+        "lineups": [{"team": {"id": 10}, "formation": "4-3-3", "startXI": []}],
         "statistics": [
             {
                 "team": {"id": 10, "name": "A"},
@@ -386,7 +529,7 @@ def test_recent_matches_skip_batch_when_base_is_already_enriched(monkeypatch):
 
     history = provider.get_team_last_matches("10")
 
-    assert calls == [("fixtures", {"team": "10", "last": "5"})]
+    assert calls == [("fixtures", {"team": "10", "last": "5", "status": "FT-AET-PEN"})]
     assert history[0]["statistics"][0]["corners"] == 5
     assert history[0]["player_statistics"][0]["shots"]["on_target"] == 1
 
@@ -412,7 +555,7 @@ def test_recent_matches_fall_back_to_base_when_batch_fails(monkeypatch):
     history = provider.get_team_last_matches("10")
 
     assert calls == [
-        ("fixtures", {"team": "10", "last": "5"}),
+        ("fixtures", {"team": "10", "last": "5", "status": "FT-AET-PEN"}),
         ("fixtures", {"ids": "1001"}),
     ]
     assert history == [base]

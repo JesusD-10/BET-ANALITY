@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 import json
 import logging
+import unicodedata
 
-from app.core.config import settings
 from app.schemas.matches import (
     H2HMatchItem,
     InjuryItem,
@@ -18,6 +18,7 @@ from app.services.opportunities import (
     enrich_analysis_with_opportunities,
     market_family,
 )
+from app.services.ai_gateway import AICompletion, ai_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,91 @@ def _market_has_evidence(market_key: str, available_families: set[str]) -> bool:
     return family not in DATA_DEPENDENT_MARKET_FAMILIES or family in available_families
 
 
+def _consensus_market_payloads(
+    completions: list[AICompletion],
+    available_families: set[str],
+    limit: int = 4,
+) -> list[dict]:
+    """Merge provider estimates while keeping the first provider's market set.
+
+    The deterministic primary result defines ordering and labels. When another
+    provider proposes the same canonical market, its probability is contrasted
+    through an equal-weight arithmetic mean. Unique secondary markets only fill
+    missing slots. Unverifiable market families are removed before aggregation.
+    """
+
+    provider_candidates: list[dict[str, tuple[dict, float]]] = []
+    provider_order: list[list[str]] = []
+    for completion in completions:
+        payload = completion.json_data or {}
+        raw_markets = payload.get("markets", [])
+        candidates: dict[str, tuple[dict, float]] = {}
+        order: list[str] = []
+        if not isinstance(raw_markets, list):
+            provider_candidates.append(candidates)
+            provider_order.append(order)
+            continue
+        for raw_market in raw_markets:
+            if not isinstance(raw_market, dict):
+                continue
+            market_key = str(raw_market.get("market_key", "")).strip().upper()
+            if (
+                not market_key
+                or market_key in candidates
+                or not _market_has_evidence(market_key, available_families)
+            ):
+                continue
+            try:
+                probability = float(raw_market.get("probability", 0.5))
+            except (TypeError, ValueError):
+                continue
+            probability = max(0.05, min(0.95, probability))
+            candidates[market_key] = (raw_market, probability)
+            order.append(market_key)
+        provider_candidates.append(candidates)
+        provider_order.append(order)
+
+    ordered_keys: list[str] = []
+    for order in provider_order:
+        for market_key in order:
+            if market_key not in ordered_keys:
+                ordered_keys.append(market_key)
+
+    merged: list[dict] = []
+    for market_key in ordered_keys[: max(1, limit)]:
+        estimates: list[float] = []
+        base_market: dict | None = None
+        base_selection = ""
+        for candidates in provider_candidates:
+            candidate = candidates.get(market_key)
+            if candidate is None:
+                continue
+            raw_market, probability = candidate
+            if base_market is None:
+                base_market = raw_market
+                base_selection = _selection_signature(raw_market.get("selection"))
+            elif _selection_signature(raw_market.get("selection")) != base_selection:
+                # Some market keys (for example BTTS) can represent opposing
+                # selections. Never average estimates that disagree on the bet.
+                continue
+            estimates.append(probability)
+        if base_market is None or not estimates:
+            continue
+        consensus_market = dict(base_market)
+        consensus_market["market_key"] = market_key
+        consensus_market["probability"] = sum(estimates) / len(estimates)
+        merged.append(consensus_market)
+    return merged
+
+
+def _selection_signature(value: object) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "").casefold())
+    without_accents = "".join(
+        character for character in normalized if not unicodedata.combining(character)
+    )
+    return " ".join(without_accents.split())
+
+
 def _format_recent_history(history: list[dict | H2HMatchItem], limit: int = 5) -> str:
     if not history:
         return "Sin partidos recientes provistos por la API."
@@ -129,16 +215,16 @@ def analyze_match_with_ai(
     h2h_matches: list[H2HMatchItem] | None = None,
     home_last_matches: list[dict | H2HMatchItem] | None = None,
     away_last_matches: list[dict | H2HMatchItem] | None = None,
-    allow_openai: bool = True,
+    allow_external_ai: bool = True,
 ) -> MatchAnalysisResponse:
     injuries_list = injuries or []
     h2h_list = h2h_matches or []
     home_history = home_last_matches or []
     away_history = away_last_matches or []
 
-    if allow_openai and settings.openai_api_key:
+    if allow_external_ai and ai_gateway.is_available():
         try:
-            analysis = _query_openai_analysis(
+            analysis = _query_distributed_ai_analysis(
                 match=match,
                 referee_info=referee_info,
                 injuries=injuries_list,
@@ -149,7 +235,10 @@ def analyze_match_with_ai(
             )
             return enrich_analysis_with_opportunities(analysis)
         except Exception as exc:
-            logger.warning("Fallo en la llamada a OpenAI API (%s). Se aplica fallback estadístico.", exc)
+            logger.warning(
+                "Falló el motor multi-IA (%s). Se aplica fallback estadístico.",
+                type(exc).__name__,
+            )
 
     return enrich_analysis_with_opportunities(
         _generate_local_fallback_analysis(
@@ -162,7 +251,7 @@ def analyze_match_with_ai(
     )
 
 
-def _query_openai_analysis(
+def _query_distributed_ai_analysis(
     match: MatchSummary,
     referee_info: RefereeInfo | None,
     injuries: list[InjuryItem],
@@ -171,14 +260,6 @@ def _query_openai_analysis(
     home_history: list[dict | H2HMatchItem],
     away_history: list[dict | H2HMatchItem],
 ) -> MatchAnalysisResponse:
-    from openai import OpenAI
-
-    client = OpenAI(
-        api_key=settings.openai_api_key,
-        timeout=settings.openai_timeout_seconds,
-        max_retries=settings.openai_max_retries,
-    )
-
     h2h_text = "\n".join([f"- {m.date} | {m.home_team} {m.score} {m.away_team} (Ganador: {m.winner})" for m in h2h_matches[:10]]) or "Sin historial directo reciente."
     injuries_text = "\n".join([f"- {inj.team}: {inj.player} ({inj.reason} - {inj.status})" for inj in injuries]) or "Sin bajas o lesionados reportados."
     
@@ -267,23 +348,20 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
 }}
 """
 
-    model_to_use = settings.openai_model if settings.openai_model and ("gpt" in settings.openai_model or "o3" in settings.openai_model or "o1" in settings.openai_model) else "gpt-4o-mini"
-    
-    response = client.chat.completions.create(
-        model=model_to_use,
-        response_format={"type": "json_object"},
+    completions = ai_gateway.complete_json_consensus(
         messages=[
             {"role": "system", "content": "Eres un asistente de análisis probabilístico cuantitativo deportivo. Respondes únicamente en formato JSON válido."},
             {"role": "user", "content": prompt_context},
         ],
+        task="analysis",
+        routing_key=match.id,
     )
+    primary_completion = completions[0]
+    parsed = primary_completion.json_data or {}
 
-    content = response.choices[0].message.content or "{}"
-    parsed = json.loads(content)
-
-    raw_markets = parsed.get("markets", [])
-    markets = []
     available_families = _available_market_families(referee_info, home_history, away_history)
+    raw_markets = _consensus_market_payloads(completions, available_families)
+    markets = []
     for m in raw_markets:
         market_key = str(m.get("market_key", "")).strip().upper()
         if not _market_has_evidence(market_key, available_families):
@@ -313,9 +391,26 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
     if not markets:
         return _generate_local_fallback_analysis(match, referee_info, injuries, lineups, h2h_matches)
 
+    if len(completions) > 1:
+        provider_label = "+".join(completion.provider for completion in completions)
+        model_version = f"multi-ai-consensus-{provider_label}"
+        consensus_note = (
+            "Consenso multi-IA: las probabilidades coincidentes se promedian "
+            "con el mismo peso entre dos proveedores independientes."
+        )
+    else:
+        model_version = (
+            f"multi-ai-{primary_completion.provider}-{primary_completion.model}"
+        )
+        consensus_note = "Análisis validado con el único proveedor disponible."
+
+    raw_notes = parsed.get("notes", [])
+    notes = [str(note) for note in raw_notes] if isinstance(raw_notes, list) else []
+    notes.append(consensus_note)
+
     return MatchAnalysisResponse(
         match=match,
-        model_version=f"openai-{model_to_use}",
+        model_version=model_version,
         updated_at=datetime.now(timezone.utc),
         referee_info=referee_info,
         injuries=injuries,
@@ -325,7 +420,7 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
         injuries_impact=parsed.get("injuries_impact"),
         referee_impact=parsed.get("referee_impact"),
         markets=markets,
-        notes=parsed.get("notes", ["Análisis cuantitativo generado con Inteligencia Artificial."]),
+        notes=notes,
     )
 
 
