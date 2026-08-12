@@ -1,10 +1,11 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ArrowUpRight, Search } from "lucide-react";
 import AppShell, { PageHeader, ResponsibleNote } from "../components/AppShell";
-import { getMatches, Match } from "../lib/api";
+import { getMatches, type Match } from "../lib/api";
 
 const groupMatchesByDate = (matchesList: Match[]) => {
   const groups: { [key: string]: Match[] } = {};

@@ -1,15 +1,11 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Activity, ArrowUpRight, BarChart3, CalendarDays, Check, ChevronRight, CircleAlert, Database, Search, ShieldCheck, Sparkles, X } from "lucide-react";
-
-type Match = { id: string; competition: string; kickoff_at: string; home_team: string; away_team: string; data_quality: number; odds_available: boolean; status: string };
-type Market = { market_key: string; label: string; selection: string; probability: number; fair_odds: number; best_odds: number | null; bookmaker: string | null; expected_value: number | null; confidence: string; data_quality: number; factors_for: string[]; risks: string[] };
-type Analysis = { match: Match; model_version: string; markets: Market[]; notes: string[] };
-
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "https://bet-anality.onrender.com/api/v1";
+import { apiUrl, type Analysis, type Match } from "./lib/api";
 const percent = (value: number) => `${Math.round(value * 100)}%`;
 const formatTime = (value: string) => new Intl.DateTimeFormat("es-PE", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 const formatDate = (value: Date) => new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "2-digit", month: "short", year: "numeric" }).format(value);

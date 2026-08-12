@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ArrowUpRight, CircleAlert, Sparkles } from "lucide-react";
 import AppShell, { PageHeader, ResponsibleNote } from "../components/AppShell";
-import { getRecommendations, Recommendation } from "../lib/api";
+import { getRecommendations, type Recommendation } from "../lib/api";
 
 export default function DreamsPage() {
   const [items, setItems] = useState<Recommendation[]>([]);

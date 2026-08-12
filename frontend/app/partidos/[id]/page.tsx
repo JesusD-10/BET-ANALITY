@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import Link from "next/link";
@@ -15,7 +16,7 @@ import {
 } from "lucide-react";
 
 import AppShell, { ResponsibleNote } from "../../components/AppShell";
-import { Analysis, getAnalysis, apiUrl } from "../../lib/api";
+import { apiUrl, getAnalysis, type Analysis } from "../../lib/api";
 
 export default function MatchDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
