@@ -6,7 +6,8 @@ Plataforma web de inteligencia deportiva para el análisis avanzado de partidos 
 
 ## 🚀 Características Principales
 
-- ⚽ **Catálogo de Partidos en Vivo y Programados**: Conexión directa a proveedores reales de datos deportivos (`Football-Data.org v4` y `API-Football v3`) para mostrar la agenda actualizada de partidos.
+- ⚽ **Catálogo con respaldo automático**: API-Football es la fuente principal y Football-Data.org toma el relevo ante suspensión, límite de cuota, credenciales rechazadas, timeout o respuesta inválida. La fuente efectiva siempre se identifica en la respuesta.
+- 🏟️ **Portada curada por liga**: muestra hasta 12 partidos de clubes y selecciones populares, con máximo 4 por competición. La búsqueda y `/partidos` conservan acceso al catálogo completo.
 - 📊 **Estadísticas e Histórico**: Tres vistas independientes con los últimos 5 H2H, los últimos 5 partidos del local y los últimos 5 del visitante.
 - 🟨 **Análisis del Árbitro Asignado**: Estadísticas de amonestaciones (tarjetas amarillas/rojas), faltas por partido y tendencias disciplinarias.
 - 🚑 **Lesionados y Sancionados**: Detección de bajas confirmadas o dudas clave en la plantilla y evaluación de su impacto táctico.
@@ -99,13 +100,19 @@ API_FOOTBALL_BASE_URL=https://v3.football.api-sports.io
 API_FOOTBALL_IS_RAPIDAPI=false
 API_FOOTBALL_TIMEOUT_SECONDS=3
 
-# Alternativa: Football-Data.org
-FOOTBALL_DATA_API_TOKEN=
+# Respaldo automático: Football-Data.org
+FOOTBALL_DATA_API_TOKEN=tu_token_football_data
 FOOTBALL_DATA_BASE_URL=https://api.football-data.org/v4
 FOOTBALL_DATA_TIMEOUT_SECONDS=2
 ```
 
 > **Nota**: Si no se proporcionan claves de IA, el análisis continúa con el motor estadístico local. Si falta el proveedor deportivo, la aplicación usa datos demostrativos identificados como tales.
+
+Para activar el respaldo en Render deben existir simultáneamente
+`API_FOOTBALL_KEY` y `FOOTBALL_DATA_API_TOKEN`, manteniendo
+`SPORTS_DATA_PROVIDER=api-football`. Si API-Football falla, el backend prueba
+Football-Data automáticamente; una agenda vacía válida no se considera un fallo.
+Los detalles e historiales se consultan después al proveedor que originó cada ID.
 
 Cerebras ofrece un nivel gratuito y `openrouter/free` limita el enrutamiento a
 modelos gratuitos, sujeto a sus cuotas y disponibilidad. xAI/Grok y DeepSeek no

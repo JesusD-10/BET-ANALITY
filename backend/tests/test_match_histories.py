@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 import time
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -264,6 +265,49 @@ def test_real_analysis_does_not_fill_missing_histories_with_demo_data(monkeypatc
     assert analysis.referee_info is not None
     assert analysis.referee_info.name == "Árbitro real"
     assert analysis.referee_info.yellow_cards_avg is None
+
+
+def test_football_data_analysis_routes_by_match_source_when_api_football_is_active(
+    monkeypatch,
+) -> None:
+    match = MatchSummary(
+        id="football-data-188",
+        external_id="188",
+        competition="Liga real",
+        kickoff_at=datetime(2026, 8, 20, 20, 0, tzinfo=timezone.utc),
+        home_team="Equipo real A",
+        away_team="Equipo real B",
+        home_team_id="11",
+        away_team_id="12",
+        status="PROGRAMADO",
+        source_provider="football-data",
+    )
+    primary = APIFootballProvider(key="key")
+    secondary = FootballDataProvider("token", "https://example.test", 2)
+    h2h = secondary.normalize_history([_football_data_fixture(1)], 5)
+    home_raw = [_football_data_fixture(20)]
+    away_raw = [_football_data_fixture(21)]
+    monkeypatch.setattr(matches_service, "get_match", lambda match_id: match)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "football_data_provider", secondary)
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "token")
+    h2h_call = MagicMock(return_value=h2h)
+    home_call = MagicMock(return_value=home_raw)
+    away_call = MagicMock(return_value=away_raw)
+    monkeypatch.setattr(secondary, "get_head_to_head", h2h_call)
+
+    def team_history(team_id: str, limit: int = 5):
+        return home_call(team_id, limit) if team_id == "11" else away_call(team_id, limit)
+
+    monkeypatch.setattr(secondary, "get_team_last_matches", team_history)
+
+    analysis = matches_service.get_analysis(match.id, use_external_ai=False)
+
+    assert analysis is not None
+    assert analysis.h2h_matches == h2h
+    h2h_call.assert_called_once_with(match.id, 10)
+    home_call.assert_called_once_with("11", 5)
+    away_call.assert_called_once_with("12", 5)
 
 
 def test_mock_analysis_exposes_three_visibly_demo_history_sections(monkeypatch) -> None:

@@ -1,4 +1,6 @@
 from datetime import date, datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,6 +29,23 @@ def _external_match(
         odds_available=True,
         status="PROGRAMADO",
         source_provider="api-football",
+    )
+
+
+def _football_data_match(fixture_id: str = "football-data-2001") -> MatchSummary:
+    return MatchSummary(
+        id=fixture_id,
+        external_id=fixture_id.removeprefix("football-data-"),
+        competition="Liga real de respaldo",
+        kickoff_at=datetime(2026, 8, 12, 23, 0, tzinfo=timezone.utc),
+        home_team="Alianza Lima",
+        away_team="Universitario",
+        home_team_id="101",
+        away_team_id="102",
+        data_quality=0.92,
+        odds_available=False,
+        status="PROGRAMADO",
+        source_provider="football-data",
     )
 
 
@@ -178,3 +197,212 @@ def test_get_match_uses_individual_lookup_without_relisting_agenda(
     individual_lookup.assert_called_once_with(fetched.id)
     list_fixtures.assert_not_called()
     assert matches_service._fixture_by_id[fetched.id][1] is fetched
+
+
+def test_api_football_failure_uses_live_football_data_and_preserves_envelope_cache(
+    monkeypatch,
+) -> None:
+    primary = APIFootballProvider(key="suspended-key")
+    secondary = matches_service.FootballDataProvider(
+        "fallback-token", "https://football-data.test/v4", 2
+    )
+    fallback_fixture = _football_data_match()
+    primary_list = MagicMock(side_effect=TimeoutError("primary suspended"))
+    secondary_list = MagicMock(return_value=[fallback_fixture])
+    active = {"provider": primary}
+    monkeypatch.setattr(primary, "list_fixtures", primary_list)
+    monkeypatch.setattr(secondary, "list_fixtures", secondary_list)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: active["provider"])
+    monkeypatch.setattr(matches_service, "football_data_provider", secondary)
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "fallback-token")
+
+    first = matches_service.get_highlights_result(SELECTED_DATE)
+    cached = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert first.matches == [fallback_fixture]
+    assert first.source == "football-data"
+    assert first.notice is not None
+    assert "api-football" in first.notice
+    assert cached == first
+    assert cached.source == "football-data"
+    assert cached.notice == first.notice
+    primary_list.assert_called_once_with(SELECTED_DATE)
+    secondary_list.assert_called_once_with(SELECTED_DATE)
+
+    active["provider"] = secondary
+    direct = matches_service.get_highlights_result(SELECTED_DATE)
+    assert direct.source == "football-data"
+    assert direct.notice is None
+    secondary_list.assert_called_once_with(SELECTED_DATE)
+
+
+def test_valid_empty_primary_agenda_does_not_trigger_fallback(monkeypatch) -> None:
+    primary = APIFootballProvider(key="valid-key")
+    secondary = matches_service.FootballDataProvider(
+        "fallback-token", "https://football-data.test/v4", 2
+    )
+    primary_list = MagicMock(return_value=[])
+    secondary_list = MagicMock(
+        side_effect=AssertionError("Una lista vacía válida no activa fallback")
+    )
+    monkeypatch.setattr(primary, "list_fixtures", primary_list)
+    monkeypatch.setattr(secondary, "list_fixtures", secondary_list)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "football_data_provider", secondary)
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "fallback-token")
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == []
+    assert result.source == "api-football"
+    assert result.notice is None
+    secondary_list.assert_not_called()
+
+
+def test_live_secondary_wins_over_stale_primary(monkeypatch) -> None:
+    clock = {"now": 100.0}
+    primary = APIFootballProvider(key="key")
+    secondary = matches_service.FootballDataProvider(
+        "fallback-token", "https://football-data.test/v4", 2
+    )
+    stale_primary = _external_match()
+    live_secondary = _football_data_match()
+    primary_list = MagicMock(return_value=[stale_primary])
+    secondary_list = MagicMock(return_value=[live_secondary])
+    monkeypatch.setattr(matches_service.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(primary, "list_fixtures", primary_list)
+    monkeypatch.setattr(secondary, "list_fixtures", secondary_list)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "football_data_provider", secondary)
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "fallback-token")
+
+    assert matches_service.get_highlights_result(SELECTED_DATE).matches == [stale_primary]
+    clock["now"] += matches_service._FIXTURE_CACHE_TTL_SECONDS + 1
+    primary_list.side_effect = TimeoutError("primary down")
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == [live_secondary]
+    assert result.source == "football-data"
+    assert result.notice is not None
+    secondary_list.assert_called_once_with(SELECTED_DATE)
+
+
+def test_both_providers_failing_return_latest_stale_real_source(monkeypatch) -> None:
+    clock = {"now": 100.0}
+    primary = APIFootballProvider(key="key")
+    secondary = matches_service.FootballDataProvider(
+        "fallback-token", "https://football-data.test/v4", 2
+    )
+    stale_primary = _external_match()
+    stale_secondary = _football_data_match()
+    monkeypatch.setattr(matches_service.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "football_data_provider", secondary)
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "fallback-token")
+    matches_service._cache_set(
+        matches_service._fixture_cache,
+        matches_service._provider_cache_key(primary, SELECTED_DATE),
+        matches_service.FixtureResult(
+            SELECTED_DATE, [stale_primary], "api-football"
+        ),
+    )
+    clock["now"] += 5
+    matches_service._cache_set(
+        matches_service._fixture_cache,
+        matches_service._provider_cache_key(secondary, SELECTED_DATE),
+        matches_service.FixtureResult(
+            SELECTED_DATE, [stale_secondary], "football-data"
+        ),
+    )
+    clock["now"] += matches_service._FIXTURE_CACHE_TTL_SECONDS + 1
+    monkeypatch.setattr(primary, "list_fixtures", MagicMock(side_effect=TimeoutError()))
+    monkeypatch.setattr(secondary, "list_fixtures", MagicMock(side_effect=TimeoutError()))
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == [stale_secondary]
+    assert result.source == "football-data"
+    assert result.notice is not None
+    assert "última agenda real" in result.notice
+    assert all(match.source_provider != "mock" for match in result.matches)
+
+
+def test_get_match_routes_football_data_prefix_even_when_api_football_is_active(
+    monkeypatch,
+) -> None:
+    primary = APIFootballProvider(key="key")
+    secondary = matches_service.FootballDataProvider(
+        "fallback-token", "https://football-data.test/v4", 2
+    )
+    expected = _football_data_match("football-data-918")
+    primary_lookup = MagicMock(side_effect=AssertionError("Proveedor equivocado"))
+    secondary_lookup = MagicMock(return_value=expected)
+    monkeypatch.setattr(primary, "get_fixture", primary_lookup)
+    monkeypatch.setattr(secondary, "get_fixture", secondary_lookup)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "football_data_provider", secondary)
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "fallback-token")
+
+    result = matches_service.get_match(expected.id)
+
+    assert result is expected
+    secondary_lookup.assert_called_once_with(expected.id)
+    primary_lookup.assert_not_called()
+
+
+def test_both_live_providers_failing_without_stale_never_use_demo(monkeypatch) -> None:
+    primary = APIFootballProvider(key="suspended-key")
+    secondary = matches_service.FootballDataProvider(
+        "fallback-token", "https://football-data.test/v4", 2
+    )
+    monkeypatch.setattr(
+        primary,
+        "list_fixtures",
+        MagicMock(side_effect=TimeoutError("primary down")),
+    )
+    monkeypatch.setattr(
+        secondary,
+        "list_fixtures",
+        MagicMock(side_effect=TimeoutError("secondary down")),
+    )
+    mock_list = MagicMock(side_effect=AssertionError("No debe usar demos"))
+    monkeypatch.setattr(matches_service.mock_provider, "list_highlights", mock_list)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "football_data_provider", secondary)
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "fallback-token")
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == []
+    assert result.source == "api-football"
+    assert result.notice is not None
+    assert "demo" in result.notice
+    mock_list.assert_not_called()
+
+
+def test_concurrent_agenda_requests_share_one_provider_refresh(monkeypatch) -> None:
+    primary = APIFootballProvider(key="key")
+    fixture = _external_match()
+    request_started = Event()
+    allow_response = Event()
+
+    def delayed_list(selected_date):
+        request_started.set()
+        assert allow_response.wait(timeout=2)
+        return [fixture]
+
+    provider_call = MagicMock(side_effect=delayed_list)
+    monkeypatch.setattr(primary, "list_fixtures", provider_call)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(matches_service.get_highlights_result, SELECTED_DATE)
+        assert request_started.wait(timeout=2)
+        second = executor.submit(matches_service.get_highlights_result, SELECTED_DATE)
+        allow_response.set()
+        results = [first.result(timeout=2), second.result(timeout=2)]
+
+    assert all(result.matches == [fixture] for result in results)
+    assert provider_call.call_count == 1

@@ -136,7 +136,12 @@ class APIFootballProvider:
             "fixtures",
             params={"date": target_date, "timezone": SPORTS_TIMEZONE.key},
         )
-        return [self._to_match_summary(item) for item in data.get("response", [])]
+        response_items = data.get("response")
+        if not isinstance(response_items, list):
+            raise APIFootballAPIError(
+                "API-Football devolvió una respuesta sin una lista de partidos válida."
+            )
+        return [self._to_match_summary(item) for item in response_items]
 
     def get_fixture(self, fixture_id: str) -> MatchSummary | None:
         clean_id = fixture_id.removeprefix("api-football-")
@@ -148,7 +153,11 @@ class APIFootballProvider:
     def get_fixture_details(self, fixture_id: str) -> dict | None:
         clean_id = fixture_id.removeprefix("api-football-")
         data = self._request("fixtures", params={"id": clean_id})
-        res = data.get("response", [])
+        res = data.get("response")
+        if not isinstance(res, list):
+            raise APIFootballAPIError(
+                "API-Football devolvió un detalle de partido con formato inesperado."
+            )
         return res[0] if res else None
 
     @staticmethod

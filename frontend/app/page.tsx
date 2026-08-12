@@ -19,21 +19,11 @@ import {
   type Match,
   type Recommendation,
 } from "./lib/api";
+import { groupMatchesByLeague, selectHomeMatches } from "./lib/popularTeams";
 const percent = (value: number) => `${Math.round(value * 100)}%`;
 const formatTime = (value: string) => new Intl.DateTimeFormat("es-PE", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 const formatDate = (value: Date) => new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "2-digit", month: "short", year: "numeric" }).format(value);
-
-const groupMatchesByDate = (matchesList: Match[]) => {
-  const groups: { [key: string]: Match[] } = {};
-  for (const m of matchesList) {
-    const dateObj = new Date(m.kickoff_at);
-    const dateStr = new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "long" }).format(dateObj);
-    const formattedDate = dateStr.charAt(0).toUpperCase() + dateStr.slice(1);
-    if (!groups[formattedDate]) groups[formattedDate] = [];
-    groups[formattedDate].push(m);
-  }
-  return groups;
-};
+const formatMatchDate = (value: string) => new Intl.DateTimeFormat("es-PE", { weekday: "short", day: "2-digit", month: "short" }).format(new Date(value));
 
 export default function Home() {
   const router = useRouter();
@@ -43,6 +33,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [catalogNotice, setCatalogNotice] = useState("");
+  const [catalogMatchCount, setCatalogMatchCount] = useState(0);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantText, setAssistantText] = useState("");
   const [assistantReply, setAssistantReply] = useState("");
@@ -54,19 +45,21 @@ export default function Home() {
     setLoading(true);
     setError("");
     setCatalogNotice("");
+    setAnalysis(null);
     const timer = window.setTimeout(async () => {
       try {
         const data = await getMatches(query, controller.signal);
         if (controller.signal.aborted) return;
-        setMatches(data.matches);
+        const visibleMatches = selectHomeMatches(data.matches, Boolean(query.trim()));
+        setMatches(visibleMatches);
+        setCatalogMatchCount(data.matches.length);
         setCatalogNotice(data.notice ?? "");
-        setAnalysis(null);
         setError("");
         setLoading(false);
 
-        if (data.matches[0]) {
+        if (visibleMatches[0]) {
           try {
-            const nextAnalysis = await getAnalysis(data.matches[0].id, controller.signal);
+            const nextAnalysis = await getAnalysis(visibleMatches[0].id, controller.signal);
             if (!controller.signal.aborted) setAnalysis(nextAnalysis);
           } catch (analysisError: unknown) {
             if (!controller.signal.aborted && !isAbortError(analysisError)) setAnalysis(null);
@@ -75,6 +68,7 @@ export default function Home() {
       } catch (requestError: unknown) {
         if (controller.signal.aborted || isAbortError(requestError)) return;
         setMatches([]);
+        setCatalogMatchCount(0);
         setAnalysis(null);
         if (requestError instanceof ApiTimeoutError) {
           setError("La agenda tardó demasiado en responder. Intenta nuevamente.");
@@ -92,7 +86,7 @@ export default function Home() {
   }, [query]);
 
   useEffect(() => {
-    getRecommendations("dreams", 4)
+    getRecommendations("dreams", 20)
       .then((data) => setDreams(data.recommendations))
       .catch(() => setDreams([]))
       .finally(() => setDreamsLoading(false));
@@ -105,7 +99,10 @@ export default function Home() {
     setAssistantReply(data.summary);
   }
 
-  const groupedMatches = groupMatchesByDate(matches);
+  const groupedMatches = groupMatchesByLeague(matches);
+  const visibleMatchIds = new Set(matches.map((match) => match.id));
+  const visibleDreams = dreams.filter((item) => visibleMatchIds.has(item.match_id)).slice(0, 4);
+  const isSearching = Boolean(query.trim());
 
   return (
     <main className="app-shell">
@@ -117,25 +114,30 @@ export default function Home() {
         <section className="section-block">
           <div className="section-heading">
             <div>
-              <p className="section-kicker">SELECCIÓN DE LA SEMANA · {matches.length} PARTIDOS</p>
-              <h2>Partidos agrupados por día</h2>
+              <p className="section-kicker">{isSearching ? "RESULTADOS DE BÚSQUEDA" : "CLUBES DESTACADOS"} · {matches.length} PARTIDOS</p>
+              <h2>Partidos separados por liga</h2>
             </div>
             <button className="text-button" onClick={() => router.push("/partidos")}>Ver agenda completa <ArrowUpRight size={15} /></button>
           </div>
           {loading ? (
             <div className="empty-state">Consultando calendario...</div>
           ) : matches.length === 0 ? (
-            <div className="empty-state">{query.trim() ? `No encontramos partidos para “${query.trim()}”.` : "No hay partidos reales disponibles para hoy."}</div>
+            <div className="empty-state home-empty-state">
+              <span>{query.trim() ? `No encontramos partidos para “${query.trim()}”.` : catalogMatchCount > 0 ? "Hoy no hay partidos de equipos populares en la agenda." : "No hay partidos reales disponibles para hoy."}</span>
+              {!query.trim() && <Link href="/partidos">Revisar agenda completa <ArrowUpRight size={14} /></Link>}
+            </div>
           ) : (
-            Object.entries(groupedMatches).map(([dateLabel, dayMatches]) => (
-              <div key={dateLabel} className="day-group">
-                <div className="date-group-header">
-                  <CalendarDays size={14} /> {dateLabel} ({dayMatches.length} partidos)
+            <div className="league-groups">
+              {groupedMatches.map((league) => (
+              <section key={league.key} className="league-group">
+                <div className="league-group-header">
+                  <span><span className="league-mark" aria-hidden="true">{league.competition.slice(0, 2).toUpperCase()}</span>{league.competition}</span>
+                  <small>{league.matches.length} {league.matches.length === 1 ? "partido" : "partidos"}</small>
                 </div>
                 <div className="match-grid">
-                  {dayMatches.map((match) => (
+                  {league.matches.map((match) => (
                     <button className={`match-card ${analysis?.match.id === match.id ? "selected" : ""}`} key={match.id} onClick={() => router.push(`/partidos/${match.id}`)}>
-                      <div className="match-meta"><span>{match.competition}</span><b>{formatTime(match.kickoff_at)}</b></div>
+                      <div className="match-meta"><span>{formatMatchDate(match.kickoff_at)}</span><b>{formatTime(match.kickoff_at)}</b></div>
                       <div className="teams">
                         <div>
                           <div className="team-badge home-badge">
@@ -166,8 +168,9 @@ export default function Home() {
                     </button>
                   ))}
                 </div>
-              </div>
-            ))
+              </section>
+              ))}
+            </div>
           )}
         </section>
         <section className="home-dreams" id="sonadoras">
@@ -176,7 +179,7 @@ export default function Home() {
             <Link className="text-button" href="/sonadoras">Ver todas <ArrowUpRight size={15} /></Link>
           </div>
           <p className="opportunity-intro">Selecciones o combinadas de alta varianza cuya cuota total de referencia alcanza 3.00, con cada condición visible.</p>
-          {dreamsLoading ? <div className="empty-state">Buscando Soñadoras del día...</div> : dreams.length ? <div className="recommendation-grid">{dreams.map((item) => <DreamRecommendationCard item={item} key={item.id} />)}</div> : <div className="empty-state">No hay Soñadoras disponibles con la agenda actual.</div>}
+          {dreamsLoading || loading ? <div className="empty-state">Buscando Soñadoras del día...</div> : visibleDreams.length ? <div className="recommendation-grid">{visibleDreams.map((item) => <DreamRecommendationCard item={item} key={item.id} />)}</div> : <div className="empty-state">No hay Soñadoras disponibles para los partidos destacados de la portada.</div>}
         </section>
         {analysis && <section className="analysis-layout" id="recomendaciones"><div className="section-block signals-block"><div className="section-heading"><div><p className="section-kicker">ANÁLISIS · {analysis.model_version}</p><h2>Mercados observados</h2></div><button className="text-button" onClick={() => setAssistantOpen(true)}><Sparkles size={15} /> Preguntar al asistente</button></div><div className="signal-list">{analysis.markets.map((market, index) => <article className="signal-row" key={market.market_key}><span className="signal-index">0{index + 1}</span><div className="signal-main"><strong>{market.selection}</strong><small>{market.label} · {market.confidence}</small></div><div className="signal-stat"><b>{percent(market.probability)}</b><small>probabilidad</small></div><div className="signal-stat"><b>{market.fair_odds.toFixed(2)}</b><small>cuota justa</small></div><div className="signal-status">{market.best_odds ? <><strong>+{percent(market.expected_value ?? 0)}</strong><small>EV · {market.bookmaker}</small></> : <><strong className="muted-value">--</strong><small>sin cuotas</small></>}</div><ChevronRight size={17} /></article>)}</div></div><aside className="insight-panel"><div className="panel-top"><span className="spark-icon"><Sparkles size={17} /></span><span>LECTURA DEL MODELO</span></div><h3>La probabilidad no<br />es rentabilidad.</h3><p>Comparamos precio, estabilidad y calidad de datos. Cuando no hay cuota, mostramos cuota justa sin inventar valor esperado.</p><div className="panel-rule" /><div className="panel-foot"><span>CALIDAD DEL PARTIDO</span><strong>{percent(analysis.match.data_quality)}</strong></div></aside></section>}
         <section className="status-strip" id="estado"><div><span className="status-icon"><Check size={15} /></span><div><strong>Motor de análisis operativo</strong><small>Datos mock versionados · modo degradado disponible</small></div></div><div><span className="status-icon"><ShieldCheck size={15} /></span><div><strong>Motor multi-IA protegido</strong><small>Proveedores externos · fallback local activo</small></div></div><div><span className="status-icon"><Activity size={15} /></span><div><strong>Calidad media</strong><small>Se calcula por partido y mercado</small></div></div></section><footer className="responsible-banner"><ShieldCheck size={20} /><div><strong>Uso responsable</strong><span>Las predicciones son estimaciones basadas en datos. No garantizan resultados ni sustituyen tu criterio.</span></div><a href="#metodologia">Metodología <ArrowUpRight size={15} /></a></footer>
