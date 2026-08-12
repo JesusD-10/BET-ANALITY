@@ -254,15 +254,14 @@ def test_api_football_failure_uses_live_football_data_and_preserves_envelope_cac
     secondary_list.assert_called_once_with(SELECTED_DATE)
 
 
-def test_valid_empty_primary_agenda_does_not_trigger_fallback(monkeypatch) -> None:
+def test_empty_primary_agenda_continues_to_fallback(monkeypatch) -> None:
     primary = APIFootballProvider(key="valid-key")
     secondary = matches_service.FootballDataProvider(
         "fallback-token", "https://football-data.test/v4", 2
     )
     primary_list = MagicMock(return_value=[])
-    secondary_list = MagicMock(
-        side_effect=AssertionError("Una lista vacía válida no activa fallback")
-    )
+    expected = _football_data_match("football-data-3001")
+    secondary_list = MagicMock(return_value=[expected])
     monkeypatch.setattr(primary, "list_fixtures", primary_list)
     monkeypatch.setattr(secondary, "list_fixtures", secondary_list)
     monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
@@ -271,10 +270,11 @@ def test_valid_empty_primary_agenda_does_not_trigger_fallback(monkeypatch) -> No
 
     result = matches_service.get_highlights_result(SELECTED_DATE)
 
-    assert result.matches == []
-    assert result.source == "api-football"
-    assert result.notice is None
-    secondary_list.assert_not_called()
+    assert result.matches == [expected]
+    assert result.source == "football-data"
+    assert result.notice is not None
+    assert "api-football no devolvió partidos" in result.notice
+    secondary_list.assert_called_once_with(SELECTED_DATE)
 
 
 def test_api_football_failure_uses_sportmonks_before_football_data(monkeypatch) -> None:
@@ -336,6 +336,64 @@ def test_third_provider_is_used_after_api_football_and_sportmonks_fail(monkeypat
     primary_list.assert_called_once_with(SELECTED_DATE)
     secondary_list.assert_called_once_with(SELECTED_DATE)
     final_list.assert_called_once_with(SELECTED_DATE)
+
+
+def test_third_provider_is_used_when_sportmonks_returns_no_matches(monkeypatch) -> None:
+    primary = APIFootballProvider(key="api-key")
+    secondary = SportmonksProvider("monks-token")
+    final_fallback = matches_service.FootballDataProvider(
+        "football-token", "https://football-data.test/v4", 10
+    )
+    expected = _football_data_match("football-data-3002")
+    primary_list = MagicMock(side_effect=TimeoutError("api-football down"))
+    secondary_list = MagicMock(return_value=[])
+    final_list = MagicMock(return_value=[expected])
+    monkeypatch.setattr(primary, "list_fixtures", primary_list)
+    monkeypatch.setattr(secondary, "list_fixtures", secondary_list)
+    monkeypatch.setattr(final_fallback, "list_fixtures", final_list)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "sportmonks_provider", secondary)
+    monkeypatch.setattr(matches_service, "football_data_provider", final_fallback)
+    monkeypatch.setattr(matches_service.settings, "sports_data_provider", "api-football")
+    monkeypatch.setattr(matches_service.settings, "sportmonks_api_token", "monks-token")
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "football-token")
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == [expected]
+    assert result.source == "football-data"
+    assert result.notice is not None
+    assert "api-football no respondió" in result.notice
+    assert "sportmonks no devolvió partidos" in result.notice
+    primary_list.assert_called_once_with(SELECTED_DATE)
+    secondary_list.assert_called_once_with(SELECTED_DATE)
+    final_list.assert_called_once_with(SELECTED_DATE)
+
+
+def test_all_empty_providers_return_empty_only_after_full_chain(monkeypatch) -> None:
+    primary = APIFootballProvider(key="api-key")
+    secondary = SportmonksProvider("monks-token")
+    final_fallback = matches_service.FootballDataProvider(
+        "football-token", "https://football-data.test/v4", 10
+    )
+    calls = [MagicMock(return_value=[]) for _ in range(3)]
+    monkeypatch.setattr(primary, "list_fixtures", calls[0])
+    monkeypatch.setattr(secondary, "list_fixtures", calls[1])
+    monkeypatch.setattr(final_fallback, "list_fixtures", calls[2])
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: primary)
+    monkeypatch.setattr(matches_service, "sportmonks_provider", secondary)
+    monkeypatch.setattr(matches_service, "football_data_provider", final_fallback)
+    monkeypatch.setattr(matches_service.settings, "sports_data_provider", "api-football")
+    monkeypatch.setattr(matches_service.settings, "sportmonks_api_token", "monks-token")
+    monkeypatch.setattr(matches_service.settings, "football_data_api_token", "football-token")
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == []
+    assert result.source == "football-data"
+    assert result.notice is not None and "todos los proveedores" in result.notice
+    for provider_call in calls:
+        provider_call.assert_called_once_with(SELECTED_DATE)
 
 
 def test_live_secondary_wins_over_stale_primary(monkeypatch) -> None:

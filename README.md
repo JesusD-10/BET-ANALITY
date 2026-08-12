@@ -6,7 +6,7 @@ Plataforma web de inteligencia deportiva para el análisis avanzado de partidos 
 
 ## 🚀 Características Principales
 
-- ⚽ **Catálogo con triple respaldo automático**: la cadena predeterminada es API-Football → Sportmonks → Football-Data.org. Ante credenciales rechazadas, límite de cuota, timeout, error de red o respuesta inválida se prueba el siguiente proveedor; la fuente efectiva siempre se identifica.
+- ⚽ **Catálogo con triple respaldo automático**: la cadena predeterminada es API-Football → Sportmonks → Football-Data.org. Ante credenciales rechazadas, límite de cuota, timeout, error de red, respuesta inválida o una agenda vacía se prueba el siguiente proveedor; la fuente efectiva siempre se identifica.
 - 🏟️ **Portada curada por liga**: muestra hasta 12 partidos de clubes y selecciones populares, con máximo 4 por competición. La búsqueda y `/partidos` conservan acceso al catálogo completo.
 - 📊 **Estadísticas e Histórico**: Tres vistas independientes con los últimos 5 H2H, los últimos 5 partidos del local y los últimos 5 del visitante.
 - 🟨 **Análisis del Árbitro Asignado**: Estadísticas de amonestaciones (tarjetas amarillas/rojas), faltas por partido y tendencias disciplinarias.

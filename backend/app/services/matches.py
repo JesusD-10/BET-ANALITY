@@ -604,6 +604,7 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
         return result
 
     failed_sources: list[str] = []
+    empty_sources: list[str] = []
     for provider in providers:
         source = _provider_name(provider)
         provider_cache_key = _provider_cache_key(provider, selected_date)
@@ -613,10 +614,18 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
             _FIXTURE_CACHE_TTL_SECONDS,
         )
         if provider_cached is not None:
+            if not provider_cached.matches:
+                empty_sources.append(provider_cached.source)
+                continue
             notice = provider_cached.notice
+            prior_results: list[str] = []
             if failed_sources:
+                prior_results.append(f"{', '.join(failed_sources)} no respondió")
+            if empty_sources:
+                prior_results.append(f"{', '.join(empty_sources)} no devolvió partidos")
+            if prior_results:
                 notice = (
-                    f"{', '.join(failed_sources)} no respondió; agenda real obtenida "
+                    f"{'; '.join(prior_results)}; agenda real obtenida "
                     f"automáticamente desde {provider_cached.source}."
                 )
             result = FixtureResult(
@@ -674,20 +683,31 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
             len(matches),
         )
 
-        # [] is a valid provider answer (including HTTP 204), not a signal to
-        # query another source or inject demo fixtures.
+        # An empty 200/204 is not an outage, but it also cannot satisfy the
+        # requested agenda. Cache it per provider and continue through the
+        # configured chain, with Football-Data remaining the final fallback.
         _provider_retry_after.pop(provider_cache_key, None)
-        notice = None
-        if failed_sources:
-            notice = (
-                f"{', '.join(failed_sources)} no respondió; agenda real obtenida "
-                f"automáticamente desde {source}."
-            )
         provider_result = FixtureResult(
             date=selected_date,
             matches=matches,
             source=source,
         )
+        _cache_set(_fixture_cache, provider_cache_key, provider_result)
+        if not matches:
+            empty_sources.append(source)
+            continue
+
+        notice = None
+        prior_results: list[str] = []
+        if failed_sources:
+            prior_results.append(f"{', '.join(failed_sources)} no respondió")
+        if empty_sources:
+            prior_results.append(f"{', '.join(empty_sources)} no devolvió partidos")
+        if prior_results:
+            notice = (
+                f"{'; '.join(prior_results)}; agenda real obtenida "
+                f"automáticamente desde {source}."
+            )
         result = FixtureResult(
             date=selected_date,
             matches=matches,
@@ -697,9 +717,27 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
         # Provider cache is route-neutral. A failover notice belongs only to
         # the route that experienced the failure, otherwise Football-Data used
         # later as primary would falsely retain an API-Football outage notice.
-        _cache_set(_fixture_cache, provider_cache_key, provider_result)
         _cache_set(_fixture_cache, route_cache_key, result)
         _index_matches(matches)
+        return result
+
+    # At least one provider answered correctly but none covered this date.
+    # Return an honest empty real-data result only after trying the full chain.
+    if empty_sources:
+        observations: list[str] = []
+        if failed_sources:
+            observations.append(f"{', '.join(failed_sources)} no respondió")
+        observations.append(f"{', '.join(empty_sources)} no devolvió partidos")
+        result = FixtureResult(
+            date=selected_date,
+            matches=[],
+            source=empty_sources[-1],
+            notice=(
+                f"{'; '.join(observations)}. Se probaron todos los proveedores "
+                "configurados y no se usaron partidos demo."
+            ),
+        )
+        _cache_set(_fixture_cache, route_cache_key, result)
         return result
 
     # A live secondary response is always preferred over stale primary data.
