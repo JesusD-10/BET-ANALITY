@@ -5,7 +5,13 @@ from fastapi import APIRouter, HTTPException, Query
 from app.schemas.health import HealthResponse
 from app.schemas.matches import AssistantQuestion, AssistantResponse, MatchAnalysisResponse, MatchListResponse, RecommendationResponse
 from app.core.config import settings
-from app.services.matches import get_analysis, get_highlights, get_recommendations, search_matches
+from app.services.matches import (
+    get_analysis,
+    get_dream_recommendations,
+    get_highlights,
+    get_recommendations,
+    search_matches,
+)
 
 router = APIRouter()
 
@@ -57,19 +63,20 @@ def analysis(match_id: str) -> MatchAnalysisResponse:
 
 
 @router.get("/recommendations/daily", response_model=RecommendationResponse, tags=["recommendations"])
-def daily_recommendations() -> RecommendationResponse:
-    return RecommendationResponse(recommendations=get_recommendations())
+def daily_recommendations(limit: int = Query(default=8, ge=1, le=20)) -> RecommendationResponse:
+    return RecommendationResponse(recommendations=get_recommendations(limit=limit))
 
 
 @router.get("/recommendations/dreams", response_model=RecommendationResponse, tags=["recommendations"])
-def dream_recommendations() -> RecommendationResponse:
-    dreams = [item for item in get_recommendations() if item.best_odds and item.best_odds >= 1.7]
-    return RecommendationResponse(recommendations=dreams[:2])
+def dream_recommendations(limit: int = Query(default=6, ge=1, le=20)) -> RecommendationResponse:
+    return RecommendationResponse(recommendations=get_dream_recommendations(limit=limit))
 
 
 @router.post("/assistant/question", response_model=AssistantResponse, tags=["assistant"])
 def assistant_question(payload: AssistantQuestion) -> AssistantResponse:
-    analysis_data = get_analysis(payload.match_id) if payload.match_id else None
+    # The assistant reuses a local analysis so one user action triggers at most
+    # one OpenAI request and remains inside the interactive timeout budget.
+    analysis_data = get_analysis(payload.match_id, use_openai=False) if payload.match_id else None
     match_label = "el partido seleccionado" if analysis_data is None else f"{analysis_data.match.home_team} - {analysis_data.match.away_team}"
     context = "{}"
     if analysis_data is not None:

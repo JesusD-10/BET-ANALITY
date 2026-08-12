@@ -29,3 +29,69 @@ a { color: inherit; text-decoration: none; }
 .row-team-logo { width: 18px; height: 18px; object-fit: contain; vertical-align: middle; margin: 0 4px; }
 .header-team-logo { width: 36px; height: 36px; object-fit: contain; vertical-align: middle; margin: 0 6px; }
 
+/* Match hero, same-match combinations and daily dream picks */
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
+.match-hero { padding: 12px 0 30px; text-align: center; }
+.match-hero-eyebrow { margin-bottom: 23px; }
+.match-hero-board { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: clamp(18px, 5vw, 64px); max-width: 720px; margin: 0 auto 27px; }
+.match-hero-team { display: grid; justify-items: center; min-width: 0; }
+.match-hero-logo-shell { display: grid; place-items: center; width: clamp(104px, 14vw, 150px); height: clamp(104px, 14vw, 150px); color: var(--lime); border: 1px solid var(--line); border-radius: 30px; background: radial-gradient(circle at 50% 35%, #28342f, #151b19 70%); box-shadow: 0 18px 55px rgba(0, 0, 0, .25); font: 700 34px 'DM Mono', monospace; }
+.match-hero-logo { width: 82%; height: 82%; object-fit: contain; filter: drop-shadow(0 12px 16px rgba(0, 0, 0, .25)); }
+.match-hero-team small { margin-top: 14px; color: var(--muted); font: 9px 'DM Mono', monospace; letter-spacing: .14em; }
+.match-hero-team strong { max-width: 18ch; margin-top: 7px; font-size: clamp(13px, 1.6vw, 18px); line-height: 1.2; text-align: center; overflow-wrap: anywhere; }
+.match-hero-versus { display: grid; justify-items: center; gap: 9px; color: var(--muted); font: 11px 'DM Mono', monospace; }
+.match-hero-versus i { display: block; width: 28px; height: 1px; background: var(--line); }
+.match-hero-meta { justify-content: center; }
+
+.match-opportunities { margin-top: 50px; padding-top: 31px; border-top: 1px solid var(--line); }
+.compact-heading { margin-bottom: 11px; }
+.opportunity-intro { max-width: 780px; margin: 0 0 22px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.combination-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.combination-card { padding: 21px; border: 1px solid #355b54; background: linear-gradient(145deg, #192522, #151b19); }
+.combination-card-dream { border-color: #704b36; background: linear-gradient(145deg, #271f1a, #181b19); }
+.combination-card-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.combination-card-top > span { display: inline-flex; align-items: center; gap: 7px; color: var(--teal); font: 9px 'DM Mono', monospace; text-transform: uppercase; }
+.combination-card-dream .combination-card-top > span { color: var(--orange); }
+.combination-card-top > strong { color: var(--lime); font: 22px 'DM Mono', monospace; }
+.combination-card h3 { margin: 17px 0 18px; font-size: 17px; line-height: 1.3; letter-spacing: -.025em; }
+.combination-legs { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.combination-legs li { display: grid; grid-template-columns: 25px 1fr; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); background: rgba(8, 12, 11, .25); font-size: 11px; }
+.combination-legs li > b { display: grid; place-items: center; width: 22px; height: 22px; color: var(--lime); border: 1px solid #4e6144; font: 10px 'DM Mono', monospace; }
+.combination-legs li span { display: grid; gap: 4px; }
+.combination-legs li small { color: var(--muted); font: 8px 'DM Mono', monospace; text-transform: uppercase; }
+.combination-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 18px 0 14px; padding: 13px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font: 8px 'DM Mono', monospace; }
+.combination-stats b { display: block; margin-bottom: 5px; color: var(--ink); font-size: 13px; }
+.combination-note { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+.combination-evidence { display: grid; gap: 6px; margin-top: 13px; font-size: 9px; line-height: 1.5; }
+.combination-evidence span:first-child { color: var(--teal); }
+.combination-evidence span:last-child { color: var(--orange); }
+.match-dream-section { margin-top: 58px; padding: 28px; border: 1px solid #704b36; background: linear-gradient(145deg, rgba(83, 51, 31, .2), rgba(21, 27, 25, .3)); }
+.match-dream-section .section-heading > svg { color: var(--orange); }
+.dream-combination-grid .combination-card { min-height: 100%; }
+
+.home-dreams { margin-top: 66px; }
+.daily-dream-card { position: relative; overflow: hidden; }
+.daily-dream-card::after { position: absolute; top: -55px; right: -55px; width: 130px; height: 130px; border-radius: 50%; background: rgba(207, 115, 60, .08); content: ''; }
+.daily-dream-match { display: flex; align-items: center; gap: 10px; min-height: 34px; }
+.daily-dream-match > small { color: var(--muted); font: 9px 'DM Mono', monospace; }
+.daily-dream-logos { display: flex; align-items: center; }
+.daily-dream-logos img { width: 28px; height: 28px; margin-right: -7px; padding: 3px; object-fit: contain; border: 1px solid var(--line); border-radius: 50%; background: #202824; }
+.dream-pill { display: inline-flex; margin-top: 18px; padding: 5px 7px; color: var(--orange); border: 1px solid #704b36; font: 8px 'DM Mono', monospace; letter-spacing: .08em; }
+.daily-dream-legs { display: grid; gap: 6px; margin-bottom: 18px; color: var(--muted); font-size: 9px; }
+.dream-risk { display: block !important; margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--line); color: var(--orange) !important; line-height: 1.5 !important; }
+
+@media (max-width: 800px) {
+  .combination-grid { grid-template-columns: 1fr; }
+  .match-dream-section { padding: 20px; }
+}
+
+@media (max-width: 600px) {
+  .match-hero-board { gap: 10px; }
+  .match-hero-logo-shell { width: clamp(78px, 27vw, 105px); height: clamp(78px, 27vw, 105px); border-radius: 22px; }
+  .match-hero-team strong { max-width: 14ch; font-size: 12px; }
+  .match-hero-team small { margin-top: 10px; }
+  .match-hero-versus { font-size: 9px; }
+  .combination-stats { grid-template-columns: 1fr 1fr; }
+  .combination-stats span:last-child { grid-column: 1 / -1; }
+}
+

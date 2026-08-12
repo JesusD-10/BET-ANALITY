@@ -1,4 +1,3 @@
-/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import Link from "next/link";
@@ -12,11 +11,14 @@ import {
   Flag,
   Users,
   History,
+  Sparkles,
   TrendingUp,
 } from "lucide-react";
 
 import AppShell, { ResponsibleNote } from "../../components/AppShell";
-import { apiUrl, getAnalysis, type Analysis } from "../../lib/api";
+import CombinationCard from "../../components/CombinationCard";
+import MatchHero from "../../components/MatchHero";
+import { apiFetch, apiUrl, getAnalysis, type Analysis } from "../../lib/api";
 
 export default function MatchDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -36,7 +38,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
     if (!question.trim()) return;
     setLoadingAnswer(true);
     try {
-      const response = await fetch(`${apiUrl}/assistant/question`, {
+      const response = await apiFetch(`${apiUrl}/assistant/question`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question, match_id: id }),
@@ -69,7 +71,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       </AppShell>
     );
 
-  const { match, referee_info, injuries, lineups, h2h_matches, markets, notes } = analysis;
+  const { match, referee_info, injuries, lineups, h2h_matches, markets, combinations = [], dream_picks = [], notes } = analysis;
 
   return (
     <AppShell>
@@ -77,27 +79,12 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
         <ArrowLeft size={16} /> Volver a partidos
       </Link>
 
-      {/* HEADER DE PARTIDO */}
-      <header className="match-detail-header">
-        <p className="eyebrow">
-          {match.competition} · {new Date(match.kickoff_at).toLocaleString("es-PE", { dateStyle: "full", timeStyle: "short" })}
-        </p>
-        <h1>
-          {match.home_logo && <img src={match.home_logo} alt={match.home_team} className="header-team-logo" />}
-          {match.home_team} <span>vs</span>{" "}
-          {match.away_logo && <img src={match.away_logo} alt={match.away_team} className="header-team-logo" />}
-          {match.away_team}
-        </h1>
-        <div className="detail-meta">
-          <span>{match.status}</span>
-          <span>Calidad {Math.round(match.data_quality * 100)}%</span>
-          <span>Modelo: {analysis.model_version}</span>
-          {match.venue && <span>Estadio: {match.venue}</span>}
-        </div>
-      </header>
+      <MatchHero match={match} modelVersion={analysis.model_version} />
 
       <nav className="detail-tabs">
         <a href="#resumen">Pronósticos & Mercados</a>
+        <a href="#combinadas">Combinadas</a>
+        <a href="#sonadora-del-partido">Soñadoras</a>
         <a href="#lesionados">Lesionados & Sancionados</a>
         <a href="#alineaciones">Alineaciones</a>
         <a href="#h2h">Historial H2H</a>
@@ -177,15 +164,28 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
               </article>
             ))}
           </div>
+
+          <section className="match-opportunities" id="combinadas">
+            <div className="section-heading compact-heading">
+              <div>
+                <p className="section-kicker">BET BUILDER · PROBABILIDAD CONJUNTA AJUSTADA</p>
+                <h2>Combinadas de alta cobertura</h2>
+              </div>
+            </div>
+            <p className="opportunity-intro">Ideas como un gol mínimo más tres tarjetas, calibradas como un único evento y con el riesgo de correlación visible.</p>
+            {combinations.length ? <div className="combination-grid">
+              {combinations.map((combination) => <CombinationCard item={combination} key={combination.id} />)}
+            </div> : <div className="empty-state">Todavía no hay combinadas calculadas para este partido.</div>}
+          </section>
         </div>
 
         <aside className="detail-aside" id="contexto">
           <div className="aside-icon">
             <ShieldCheck size={19} />
           </div>
-          <h2>Evidencia y Datos Reales</h2>
+          <h2>Evidencia y datos disponibles</h2>
           <p>
-            Análisis generado combinando el histórico de API-Football con el motor probabilístico de OpenAI.
+            El análisis combina la información disponible del proveedor con el motor probabilístico y muestra sus limitaciones.
           </p>
           <div className="aside-rule" />
           {analysis.tactical_summary && (
@@ -206,6 +206,20 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
             </span>
           ))}
         </aside>
+      </section>
+
+      <section className="match-dream-section" id="sonadora-del-partido">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">SOÑADORAS · PROBABILIDAD MODELADA MÍNIMA 30%</p>
+            <h2>Jugadas de mayor cuota para este partido</h2>
+          </div>
+          <Sparkles size={22} />
+        </div>
+        <p className="opportunity-intro">Cada selección apunta a una cuota justa de referencia igual o superior a 3.00. Son ideas de alta varianza, no apuestas seguras.</p>
+        {dream_picks.length ? <div className="combination-grid dream-combination-grid">
+          {dream_picks.map((dream) => <CombinationCard item={dream} dream key={dream.id} />)}
+        </div> : <div className="empty-state">Todavía no hay Soñadoras calculadas para este partido.</div>}
       </section>
 
       {/* SECCIÓN DE JUGADORES LESIONADOS O SANCIONADOS */}

@@ -94,6 +94,29 @@ class MarketAnalysis(BaseModel):
     risks: list[str]
 
 
+class CombinationLeg(BaseModel):
+    market_key: str
+    label: str
+    selection: str
+
+
+class CombinationAnalysis(BaseModel):
+    id: str
+    label: str
+    selection: str
+    legs: list[CombinationLeg]
+    probability: float = Field(ge=0, le=1)
+    fair_odds: float = Field(gt=1)
+    best_odds: float | None = Field(default=None, gt=1)
+    expected_value: float | None = None
+    confidence: str
+    data_quality: float = Field(ge=0, le=1)
+    factors_for: list[str]
+    risks: list[str]
+    correlation_note: str
+    kind: str = "combination"
+
+
 class MatchAnalysisResponse(BaseModel):
     match: MatchSummary
     model_version: str
@@ -106,6 +129,8 @@ class MatchAnalysisResponse(BaseModel):
     injuries_impact: str | None = None
     referee_impact: str | None = None
     markets: list[MarketAnalysis]
+    combinations: list[CombinationAnalysis] = Field(default_factory=list)
+    dream_picks: list[CombinationAnalysis] = Field(default_factory=list)
     notes: list[str]
 
 
@@ -121,6 +146,12 @@ class Recommendation(BaseModel):
     expected_value: float | None = None
     kind: str
     rationale: str
+    legs: list[CombinationLeg] = Field(default_factory=list)
+    confidence: str = "Media"
+    data_quality: float = Field(default=0.7, ge=0, le=1)
+    risk_note: str | None = None
+    home_logo: str | None = None
+    away_logo: str | None = None
 
 
 class RecommendationResponse(BaseModel):

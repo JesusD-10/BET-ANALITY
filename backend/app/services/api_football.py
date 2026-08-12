@@ -20,7 +20,7 @@ class APIFootballProvider:
 
     provider_name = "api-football"
 
-    def __init__(self, key: str, base_url: str = "https://v3.football.api-sports.io", is_rapidapi: bool = False, timeout: int = 15) -> None:
+    def __init__(self, key: str, base_url: str = "https://v3.football.api-sports.io", is_rapidapi: bool = False, timeout: int = 2) -> None:
         self.key = key
         self.base_url = base_url.rstrip("/")
         self.is_rapidapi = is_rapidapi

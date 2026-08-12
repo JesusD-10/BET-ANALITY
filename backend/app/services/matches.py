@@ -1,5 +1,7 @@
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timezone
+from concurrent.futures import Future, ThreadPoolExecutor
 import logging
+import time
 import httpx
 
 from app.core.config import settings
@@ -8,6 +10,7 @@ from app.schemas.matches import (
     InjuryItem,
     MatchAnalysisResponse,
     MatchSummary,
+    Recommendation,
     RefereeInfo,
 )
 from app.services.ai_analyzer import analyze_match_with_ai
@@ -19,12 +22,13 @@ logger = logging.getLogger(__name__)
 class MockSportsDataProvider:
     """Datos demostrativos aislados para desarrollar la interfaz sin proveedor real."""
 
-    def list_highlights(self) -> list[MatchSummary]:
+    def list_highlights(self, match_date: date | None = None) -> list[MatchSummary]:
+        selected_date = match_date or date.today()
         return [
             MatchSummary(
                 id="demo-arsenal-chelsea",
                 competition="Premier League",
-                kickoff_at=datetime(2026, 8, 7, 19, 30, tzinfo=timezone.utc),
+                kickoff_at=datetime(selected_date.year, selected_date.month, selected_date.day, 19, 30, tzinfo=timezone.utc),
                 home_team="Arsenal",
                 away_team="Chelsea",
                 home_team_id="42",
@@ -43,7 +47,7 @@ class MockSportsDataProvider:
             MatchSummary(
                 id="demo-bayern-dortmund",
                 competition="Bundesliga",
-                kickoff_at=datetime(2026, 8, 7, 20, 0, tzinfo=timezone.utc),
+                kickoff_at=datetime(selected_date.year, selected_date.month, selected_date.day, 20, 0, tzinfo=timezone.utc),
                 home_team="Bayern Munich",
                 away_team="Borussia Dortmund",
                 home_team_id="157",
@@ -62,7 +66,7 @@ class MockSportsDataProvider:
             MatchSummary(
                 id="demo-inter-milan",
                 competition="Serie A",
-                kickoff_at=datetime(2026, 8, 7, 21, 45, tzinfo=timezone.utc),
+                kickoff_at=datetime(selected_date.year, selected_date.month, selected_date.day, 21, 45, tzinfo=timezone.utc),
                 home_team="Inter",
                 away_team="AC Milan",
                 home_team_id="505",
@@ -96,9 +100,8 @@ class FootballDataProvider:
 
     def list_fixtures(self, match_date: date) -> list[MatchSummary]:
         endpoint = f"{self.base_url}/matches"
-        today = date.today()
-        from_date = today.isoformat()
-        to_date = (today + timedelta(days=4)).isoformat()
+        from_date = match_date.isoformat()
+        to_date = match_date.isoformat()
 
         response = httpx.get(
             endpoint,
@@ -222,6 +225,26 @@ football_data_provider = FootballDataProvider(
     settings.football_data_timeout_seconds,
 )
 
+_FIXTURE_CACHE_TTL_SECONDS = 30
+_ANALYSIS_CACHE_TTL_SECONDS = 120
+_fixture_cache: dict[str, tuple[float, list[MatchSummary]]] = {}
+_analysis_cache: dict[tuple[str, bool], tuple[float, MatchAnalysisResponse]] = {}
+
+
+def _cache_get(cache: dict, key: object, ttl: int):
+    cached = cache.get(key)
+    if cached is None:
+        return None
+    stored_at, value = cached
+    if time.monotonic() - stored_at > ttl:
+        cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(cache: dict, key: object, value: object) -> None:
+    cache[key] = (time.monotonic(), value)
+
 
 def _active_provider():
     provider_setting = settings.sports_data_provider.casefold()
@@ -235,19 +258,29 @@ def _active_provider():
 def get_highlights(match_date: date | None = None) -> list[MatchSummary]:
     selected_date = match_date or date.today()
     provider = _active_provider()
+    cache_key = f"{getattr(provider, 'provider_name', 'mock')}:{selected_date.isoformat()}"
+    cached = _cache_get(_fixture_cache, cache_key, _FIXTURE_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+
+    matches: list[MatchSummary]
     if isinstance(provider, APIFootballProvider):
         try:
-            return provider.list_fixtures(selected_date)
+            matches = provider.list_fixtures(selected_date)
         except Exception as exc:
             logger.error("Error al obtener partidos desde API-Football: %s. Se usa mock_provider.", exc)
-            return mock_provider.list_highlights()
-    if isinstance(provider, FootballDataProvider):
+            matches = mock_provider.list_highlights(selected_date)
+    elif isinstance(provider, FootballDataProvider):
         try:
-            return provider.list_fixtures(selected_date)
+            matches = provider.list_fixtures(selected_date)
         except Exception as exc:
             logger.error("Error al obtener partidos desde FootballDataProvider: %s. Se usa mock_provider.", exc)
-            return mock_provider.list_highlights()
-    return provider.list_highlights()
+            matches = mock_provider.list_highlights(selected_date)
+    else:
+        matches = provider.list_highlights(selected_date)
+
+    _cache_set(_fixture_cache, cache_key, matches)
+    return matches
 
 
 def search_matches(query: str | None = None) -> list[MatchSummary]:
@@ -272,7 +305,26 @@ def get_match(match_id: str) -> MatchSummary | None:
 
 
 
-def get_analysis(match_id: str) -> MatchAnalysisResponse | None:
+def _future_value(future: Future | None, default):
+    if future is None:
+        return default
+    try:
+        return future.result()
+    except Exception as exc:
+        logger.warning("Dato complementario no disponible: %s", exc)
+        return default
+
+
+def get_analysis(match_id: str, use_openai: bool = True) -> MatchAnalysisResponse | None:
+    cache_key = (match_id, use_openai)
+    cached = _cache_get(_analysis_cache, cache_key, _ANALYSIS_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    if not use_openai:
+        enriched_cached = _cache_get(_analysis_cache, (match_id, True), _ANALYSIS_CACHE_TTL_SECONDS)
+        if enriched_cached is not None:
+            return enriched_cached
+
     match = get_match(match_id)
     if match is None:
         return None
@@ -286,26 +338,32 @@ def get_analysis(match_id: str) -> MatchAnalysisResponse | None:
 
     provider = _active_provider()
     if isinstance(provider, APIFootballProvider) and match.id.startswith("api-football-"):
-        try:
-            fixture_id = match.external_id or match.id.replace("api-football-", "")
-            injuries = provider.get_fixture_injuries(fixture_id)
-            lineups = provider.get_fixture_lineups(fixture_id)
+        fixture_id = match.external_id or match.id.replace("api-football-", "")
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            injuries_future = executor.submit(provider.get_fixture_injuries, fixture_id)
+            lineups_future = executor.submit(provider.get_fixture_lineups, fixture_id)
+            h2h_future = None
+            home_future = None
+            away_future = None
             if match.home_team_id and match.away_team_id:
-                h2h_matches = provider.get_head_to_head(match.home_team_id, match.away_team_id, limit=10)
-                home_history = provider.get_team_last_matches(match.home_team_id, limit=10)
-                away_history = provider.get_team_last_matches(match.away_team_id, limit=10)
-        except Exception as exc:
-            logger.warning("No se pudieron obtener detalles completos de API-Football para %s: %s", match_id, exc)
+                h2h_future = executor.submit(provider.get_head_to_head, match.home_team_id, match.away_team_id, 10)
+                home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 10)
+                away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 10)
+
+            injuries = _future_value(injuries_future, [])
+            lineups = _future_value(lineups_future, None)
+            h2h_matches = _future_value(h2h_future, [])
+            home_history = _future_value(home_future, [])
+            away_history = _future_value(away_future, [])
 
     elif isinstance(provider, FootballDataProvider) and match.id.startswith("football-data-"):
-        try:
-            h2h_matches = provider.get_head_to_head(match.id, limit=10)
-            if match.home_team_id:
-                home_history = provider.get_team_last_matches(match.home_team_id, limit=10)
-            if match.away_team_id:
-                away_history = provider.get_team_last_matches(match.away_team_id, limit=10)
-        except Exception as exc:
-            logger.warning("No se pudieron obtener detalles completos de FootballDataProvider para %s: %s", match_id, exc)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            h2h_future = executor.submit(provider.get_head_to_head, match.id, 10)
+            home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 10) if match.home_team_id else None
+            away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 10) if match.away_team_id else None
+            h2h_matches = _future_value(h2h_future, [])
+            home_history = _future_value(home_future, [])
+            away_history = _future_value(away_future, [])
 
 
     if not h2h_matches:
@@ -347,7 +405,7 @@ def get_analysis(match_id: str) -> MatchAnalysisResponse | None:
             tendency="Mantiene control riguroso en mediocampo" if y_avg > 4.5 else "Permite fluidez en transiciones",
         )
 
-    return analyze_match_with_ai(
+    analysis = analyze_match_with_ai(
         match=match,
         referee_info=referee_info,
         injuries=injuries,
@@ -355,17 +413,21 @@ def get_analysis(match_id: str) -> MatchAnalysisResponse | None:
         h2h_matches=h2h_matches,
         home_last_matches=home_history,
         away_last_matches=away_history,
+        allow_openai=use_openai,
     )
+    _cache_set(_analysis_cache, cache_key, analysis)
+    return analysis
 
 
-def get_recommendations() -> list:
-    from app.schemas.matches import Recommendation
+def _quick_analysis(match: MatchSummary) -> MatchAnalysisResponse:
+    return analyze_match_with_ai(match=match, allow_openai=False)
 
-    result = []
+
+def get_recommendations(limit: int | None = None) -> list[Recommendation]:
+    """Build the daily simple list without N OpenAI/provider detail calls."""
+    result: list[Recommendation] = []
     for match in get_highlights():
-        analysis_data = get_analysis(match.id)
-        if analysis_data is None or not analysis_data.markets:
-            continue
+        analysis_data = _quick_analysis(match)
         for index, market in enumerate(analysis_data.markets[:2]):
             result.append(
                 Recommendation(
@@ -380,7 +442,50 @@ def get_recommendations() -> list:
                     expected_value=market.expected_value,
                     kind="simple",
                     rationale=market.factors_for[0] if market.factors_for else "Respaldo estadístico de forma",
+                    confidence=market.confidence,
+                    data_quality=market.data_quality,
+                    home_logo=match.home_logo,
+                    away_logo=match.away_logo,
                 )
             )
+    result.sort(key=lambda item: (item.probability * item.data_quality), reverse=True)
+    return result[:limit] if limit is not None else result
+
+
+def get_dream_recommendations(limit: int = 6) -> list[Recommendation]:
+    """Return diversified same-match dream builders for today's fixtures."""
+    analyses = [_quick_analysis(match) for match in get_highlights()]
+    result: list[Recommendation] = []
+
+    # Round-robin keeps the home page from being dominated by one match.
+    for pick_index in range(2):
+        for analysis_data in analyses:
+            if pick_index >= len(analysis_data.dream_picks):
+                continue
+            dream = analysis_data.dream_picks[pick_index]
+            match = analysis_data.match
+            result.append(
+                Recommendation(
+                    id=dream.id,
+                    match_id=match.id,
+                    match_label=f"{match.home_team} - {match.away_team}",
+                    market=dream.label,
+                    selection=dream.selection,
+                    probability=dream.probability,
+                    fair_odds=dream.fair_odds,
+                    best_odds=dream.best_odds,
+                    expected_value=dream.expected_value,
+                    kind=dream.kind,
+                    rationale=dream.factors_for[0],
+                    legs=dream.legs,
+                    confidence=dream.confidence,
+                    data_quality=dream.data_quality,
+                    risk_note=dream.correlation_note,
+                    home_logo=match.home_logo,
+                    away_logo=match.away_logo,
+                )
+            )
+            if len(result) >= limit:
+                return result
     return result
 

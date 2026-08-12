@@ -12,6 +12,7 @@ from app.schemas.matches import (
     MatchSummary,
     RefereeInfo,
 )
+from app.services.opportunities import enrich_analysis_with_opportunities
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +25,16 @@ def analyze_match_with_ai(
     h2h_matches: list[H2HMatchItem] | None = None,
     home_last_matches: list[dict] | None = None,
     away_last_matches: list[dict] | None = None,
+    allow_openai: bool = True,
 ) -> MatchAnalysisResponse:
     injuries_list = injuries or []
     h2h_list = h2h_matches or []
     home_history = home_last_matches or []
     away_history = away_last_matches or []
 
-    if settings.openai_api_key:
+    if allow_openai and settings.openai_api_key:
         try:
-            return _query_openai_analysis(
+            analysis = _query_openai_analysis(
                 match=match,
                 referee_info=referee_info,
                 injuries=injuries_list,
@@ -41,15 +43,18 @@ def analyze_match_with_ai(
                 home_history=home_history,
                 away_history=away_history,
             )
+            return enrich_analysis_with_opportunities(analysis)
         except Exception as exc:
             logger.warning("Fallo en la llamada a OpenAI API (%s). Se aplica fallback estadístico.", exc)
 
-    return _generate_local_fallback_analysis(
-        match=match,
-        referee_info=referee_info,
-        injuries=injuries_list,
-        lineups=lineups,
-        h2h_matches=h2h_list,
+    return enrich_analysis_with_opportunities(
+        _generate_local_fallback_analysis(
+            match=match,
+            referee_info=referee_info,
+            injuries=injuries_list,
+            lineups=lineups,
+            h2h_matches=h2h_list,
+        )
     )
 
 
@@ -62,7 +67,7 @@ def _query_openai_analysis(
     home_history: list[dict],
     away_history: list[dict],
 ) -> MatchAnalysisResponse:
-    from openai import OpenAI, OpenAIError
+    from openai import OpenAI
 
     client = OpenAI(
         api_key=settings.openai_api_key,
@@ -142,25 +147,14 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
 
     model_to_use = settings.openai_model if settings.openai_model and ("gpt" in settings.openai_model or "o3" in settings.openai_model or "o1" in settings.openai_model) else "gpt-4o-mini"
     
-    try:
-        response = client.chat.completions.create(
-            model=model_to_use,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "Eres un asistente de análisis probabilístico cuantitativo deportivo. Respondes únicamente en formato JSON válido."},
-                {"role": "user", "content": prompt_context},
-            ],
-        )
-    except OpenAIError as err:
-        logger.warning("Error con el modelo %s (%s). Intentando fallback a gpt-4o-mini.", model_to_use, err)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "Eres un asistente de análisis probabilístico cuantitativo deportivo. Respondes únicamente en formato JSON válido."},
-                {"role": "user", "content": prompt_context},
-            ],
-        )
+    response = client.chat.completions.create(
+        model=model_to_use,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "Eres un asistente de análisis probabilístico cuantitativo deportivo. Respondes únicamente en formato JSON válido."},
+            {"role": "user", "content": prompt_context},
+        ],
+    )
 
     content = response.choices[0].message.content or "{}"
     parsed = json.loads(content)
@@ -378,4 +372,3 @@ def _generate_local_fallback_analysis(
             "Cuota justa calculada inversamente a la probabilidad estimada.",
         ],
     )
-

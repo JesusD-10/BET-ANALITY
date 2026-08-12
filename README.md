@@ -15,6 +15,8 @@ Plataforma web de inteligencia deportiva para el análisis avanzado de partidos 
   - Calibración de probabilidades por mercado (1X2, Doble Oportunidad, Total Goles, Ambos Anotan, Córners, Tarjetas).
   - Cálculo de **Cuota Justa** ($1 / \text{probabilidad}$) y **Valor Esperado (EV %)**.
   - Factores a favor y riesgos identificados para cada opción de mercado.
+- 🧩 **Combinadas por Partido**: Bet builders de dos o tres condiciones con probabilidad conjunta ajustada, cuota justa de referencia y advertencias de correlación.
+- ✨ **Soñadoras por Partido y del Día**: Selecciones de alta varianza con probabilidad modelada mínima del 30% y cuotas justas de referencia desde 3.00.
 - 💬 **Asistente de IA Interactivo**: Chat dedicado para realizar preguntas tácticas y consultas específicas de valor sobre cualquier encuentro.
 
 ---
@@ -66,16 +68,20 @@ DEBUG=true
 # Clave de OpenAI
 OPENAI_API_KEY=tu_openai_api_key_aqui
 OPENAI_MODEL=gpt-5-mini
-OPENAI_TIMEOUT_SECONDS=30
+OPENAI_TIMEOUT_SECONDS=5
+OPENAI_MAX_RETRIES=0
 
 # Proveedor de Datos Deportivos (football-data o api-football)
 SPORTS_DATA_PROVIDER=football-data
 FOOTBALL_DATA_API_TOKEN=tu_football_data_token_aqui
 FOOTBALL_DATA_BASE_URL=https://api.football-data.org/v4
-FOOTBALL_DATA_TIMEOUT_SECONDS=15
+FOOTBALL_DATA_TIMEOUT_SECONDS=2
+API_FOOTBALL_TIMEOUT_SECONDS=2
 ```
 
 > **Nota**: Si no se proporcionan las claves de API, el sistema funcionará automáticamente con un proveedor de datos demostrativos y un motor estadístico local sin interrumpir la interfaz.
+
+Todas las solicitudes del navegador se cancelan a los 10 segundos. Las llamadas del backend usan presupuestos menores y fallback local para evitar esperas prolongadas.
 
 ---
 
