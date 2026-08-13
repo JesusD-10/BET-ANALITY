@@ -240,7 +240,7 @@ class SportmonksProvider:
     def get_team_last_matches(self, team_id: str, limit: int = 5) -> list[dict]:
         if not str(team_id).isdigit():
             return []
-        bounded_limit = max(1, min(int(limit), 5))
+        bounded_limit = max(1, min(int(limit), 10))
         today = datetime.now(SPORTS_TIMEZONE).date()
         # The endpoint allows at most 100 calendar days. A 99-day delta is
         # an inclusive 100-day window.

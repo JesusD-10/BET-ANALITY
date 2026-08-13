@@ -202,6 +202,44 @@ a { color: inherit; text-decoration: none; }
   background: rgba(255, 255, 255, .1);
   font: 700 12px 'DM Mono', monospace;
 }
+.history-more-button { width: 100%; padding: 11px 14px; border: 1px solid #4f3f63; border-radius: 8px; color: #d8b4fe; background: rgba(88, 45, 120, .14); cursor: pointer; font: 9px 'DM Mono', monospace; }
+.history-more-button:hover { border-color: #a855f7; }
+
+/* Competition-first fixture browser */
+.competition-browser { display: grid; gap: 28px; }
+.competition-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(235px, 1fr)); gap: 10px; }
+.competition-card { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 15px; border: 1px solid var(--line); color: var(--ink); background: #171d1b; text-align: left; cursor: pointer; }
+.competition-card:hover, .competition-card.active { border-color: var(--lime); background: #1d2723; }
+.competition-card > span:nth-child(2) { display: grid; gap: 5px; min-width: 0; }
+.competition-card strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.competition-card small { color: var(--muted); font: 9px 'DM Mono', monospace; }
+.competition-card > svg { color: var(--muted); }
+.competition-fixtures { margin-top: 4px; }
+.competition-fixtures-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.competition-fixtures-header small { color: var(--muted); font: 8px 'DM Mono', monospace; }
+.competition-fixtures-header h2 { margin: 5px 0 0; font-size: 22px; }
+.competition-prompt { text-align: center; }
+
+/* Verified discipline and 4-3-3 lineup visualisation */
+.discipline-card { padding: 19px; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; background: rgba(255,255,255,.04); }
+.context-card-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--orange); }
+.context-card-heading h3 { margin: 0; font-size: 15px; }
+.discipline-team { display: grid; grid-template-columns: minmax(110px, 1fr) repeat(3, auto); align-items: center; gap: 11px; padding: 10px 0; border-top: 1px solid var(--line); }
+.discipline-team > strong { font-size: 10px; }
+.discipline-team > span { display: grid; color: var(--lime); font: 12px 'DM Mono', monospace; text-align: center; }
+.discipline-team span small { margin-top: 3px; color: var(--muted); font-size: 7px; }
+.discipline-team em { grid-column: 1 / -1; color: var(--muted); font: 8px 'DM Mono', monospace; }
+.discipline-card > p { margin: 10px 0 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+.formation-pitch { position: relative; display: grid; grid-template-rows: repeat(4, 1fr); gap: 9px; min-height: 440px; margin-top: 12px; padding: 18px 9px; overflow: hidden; border: 1px solid #50715e; border-radius: 10px; background: repeating-linear-gradient(0deg, #173f2d 0, #173f2d 55px, #194a34 55px, #194a34 110px); }
+.formation-pitch::before { position: absolute; inset: 7px; border: 1px solid rgba(255,255,255,.45); content: ''; pointer-events: none; }
+.formation-pitch::after { position: absolute; top: 50%; left: 50%; width: 70px; height: 70px; border: 1px solid rgba(255,255,255,.4); border-radius: 50%; content: ''; transform: translate(-50%, -50%); pointer-events: none; }
+.pitch-halfway { position: absolute; top: 50%; right: 7px; left: 7px; border-top: 1px solid rgba(255,255,255,.4); }
+.formation-row { z-index: 1; display: flex; align-items: center; justify-content: space-around; gap: 4px; }
+.formation-player { display: grid; justify-items: center; width: min(22%, 82px); min-width: 0; text-align: center; }
+.formation-player b { display: grid; place-items: center; width: 29px; height: 29px; border: 2px solid #d7ffe4; border-radius: 50%; color: #102018; background: var(--lime); font: 700 9px 'DM Mono', monospace; box-shadow: 0 3px 10px rgba(0,0,0,.4); }
+.formation-pitch-away .formation-player b { background: #60a5fa; }
+.formation-caption { margin: -2px 0 14px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.formation-player span { max-width: 100%; margin-top: 5px; padding: 2px 4px; overflow: hidden; color: white; background: rgba(0,0,0,.6); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 600px) {
   .detail-tab { min-height: 47px; padding: 0 13px; font-size: 9px; }
@@ -210,5 +248,9 @@ a { color: inherit; text-decoration: none; }
   .detail-tab-panel.match-dream-section { margin-top: 24px; }
   .history-match-row { align-items: flex-start; }
   .history-match-row b { font-size: 11px; }
+  .competition-grid { grid-template-columns: 1fr; }
+  .competition-fixtures-header { align-items: flex-start; flex-direction: column; }
+  .discipline-team { grid-template-columns: 1fr repeat(3, auto); }
+  .formation-pitch { min-height: 380px; }
 }
 

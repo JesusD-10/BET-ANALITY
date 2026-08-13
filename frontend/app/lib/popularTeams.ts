@@ -152,6 +152,19 @@ export function isPopularMatch(match: Match): boolean {
   return isPopularTeam(match.home_team) || isPopularTeam(match.away_team);
 }
 
+export function isCurrentOrUpcomingMatch(match: Match, nowMs = Date.now()): boolean {
+  const status = normalizeFootballName(match.status);
+  if (["en juego", "en pausa", "retrasado"].includes(status)) return true;
+  if ([
+    "finalizado",
+    "cancelado",
+    "suspendido",
+    "eliminado",
+  ].includes(status)) return false;
+  const kickoffMs = new Date(match.kickoff_at).getTime();
+  return Number.isFinite(kickoffMs) && kickoffMs >= nowMs;
+}
+
 function leaguePriority(competition: string): number {
   const normalized = normalizeFootballName(competition);
   const priority = LEAGUE_PRIORITY.findIndex((name) => normalized.includes(name));
@@ -194,7 +207,10 @@ export function groupMatchesByLeague(matches: Match[]): HomeLeagueGroup[] {
  * working across the complete catalog, but remain capped and grouped.
  */
 export function selectHomeMatches(matches: Match[], includeSearchResults = false): Match[] {
-  const candidates = includeSearchResults ? matches : matches.filter(isPopularMatch);
+  const currentOrUpcoming = matches.filter(isCurrentOrUpcomingMatch);
+  const candidates = includeSearchResults
+    ? currentOrUpcoming
+    : currentOrUpcoming.filter(isPopularMatch);
   const groups = groupMatchesByLeague(candidates);
   const selected: Match[] = [];
 

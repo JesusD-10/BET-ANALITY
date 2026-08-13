@@ -6,18 +6,7 @@ import { useEffect, useState } from "react";
 import { ArrowUpRight, Search } from "lucide-react";
 import AppShell, { PageHeader, ResponsibleNote } from "../components/AppShell";
 import { ApiError, ApiTimeoutError, getMatches, isAbortError, type Match } from "../lib/api";
-
-const groupMatchesByDate = (matchesList: Match[]) => {
-  const groups: { [key: string]: Match[] } = {};
-  for (const m of matchesList) {
-    const dateObj = new Date(m.kickoff_at);
-    const dateStr = new Intl.DateTimeFormat("es-ES", { weekday: "long", day: "numeric", month: "long" }).format(dateObj);
-    const formattedDate = dateStr.charAt(0).toUpperCase() + dateStr.slice(1);
-    if (!groups[formattedDate]) groups[formattedDate] = [];
-    groups[formattedDate].push(m);
-  }
-  return groups;
-};
+import { groupMatchesByLeague } from "../lib/popularTeams";
 
 export default function PartidosPage() {
   const [query, setQuery] = useState("");
@@ -26,6 +15,7 @@ export default function PartidosPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [retryVersion, setRetryVersion] = useState(0);
+  const [selectedCompetition, setSelectedCompetition] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -39,6 +29,11 @@ export default function PartidosPage() {
           if (controller.signal.aborted) return;
           setMatches(data.matches);
           setNotice(data.notice ?? "");
+          setSelectedCompetition((current) =>
+            current && data.matches.some((match) => match.competition === current)
+              ? current
+              : null,
+          );
         })
         .catch((requestError: unknown) => {
           if (controller.signal.aborted || isAbortError(requestError)) return;
@@ -65,26 +60,49 @@ export default function PartidosPage() {
     };
   }, [query, retryVersion]);
 
-  const grouped = groupMatchesByDate(matches);
+  const grouped = groupMatchesByLeague(matches);
+  const selectedGroup = grouped.find(
+    (group) => group.competition === selectedCompetition,
+  );
 
   return (
     <AppShell>
       <PageHeader eyebrow="AGENDA · BÚSQUEDA Y CALENDARIO" title="Partidos" action={<Link className="outline-link" href="/">Volver al panorama <ArrowUpRight size={15} /></Link>} />
-      <div className="page-toolbar"><div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Equipo, liga o competición" /></div><span className="date-label">Organizados por fecha</span></div>
+      <div className="page-toolbar"><div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Equipo, liga o competición" /></div><span className="date-label">Organizados por competición</span></div>
       {notice && <p className="data-notice">{notice}</p>}
       {error && <div className="api-alert"><span>{error}</span><button className="text-button" type="button" onClick={() => setRetryVersion((value) => value + 1)}>Reintentar</button></div>}
-      <section className="match-list">
+      <section className="competition-browser">
         {loading ? (
           <div className="empty-state">Consultando calendario...</div>
         ) : error ? null : matches.length === 0 ? (
           <div className="empty-state">{query.trim() ? `No encontramos partidos para “${query.trim()}”.` : "No hay partidos disponibles para hoy."}</div>
-        ) : Object.entries(grouped).map(([dateLabel, dayMatches]) => (
-          <div key={dateLabel}>
-            <div className="date-group-header">{dateLabel}</div>
-            {dayMatches.map((match) => (
+        ) : (
+          <>
+            <div className="competition-grid" aria-label="Competiciones disponibles">
+              {grouped.map((group) => (
+                <button
+                  className={`competition-card ${selectedCompetition === group.competition ? "active" : ""}`}
+                  key={group.key}
+                  type="button"
+                  onClick={() => setSelectedCompetition(group.competition)}
+                >
+                  <span className="league-mark">{group.competition.slice(0, 2).toUpperCase()}</span>
+                  <span><strong>{group.competition}</strong><small>{group.matches.length} {group.matches.length === 1 ? "partido" : "partidos"}</small></span>
+                  <ArrowUpRight size={16} />
+                </button>
+              ))}
+            </div>
+            {selectedGroup ? (
+              <div className="competition-fixtures">
+                <div className="competition-fixtures-header">
+                  <div><small>COMPETICIÓN SELECCIONADA</small><h2>{selectedGroup.competition}</h2></div>
+                  <button type="button" className="text-button" onClick={() => setSelectedCompetition(null)}>Cambiar competición</button>
+                </div>
+                <div className="match-list">
+                {selectedGroup.matches.map((match) => (
               <Link className="match-list-row" href={`/partidos/${match.id}`} key={match.id}>
                 <div>
-                  <small>{match.competition} · {new Date(match.kickoff_at).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</small>
+                  <small>{new Date(match.kickoff_at).toLocaleDateString("es-PE", { weekday: "short", day: "2-digit", month: "short" })} · {new Date(match.kickoff_at).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</small>
                   <strong>
                     {match.home_logo && <img src={match.home_logo} alt="" className="row-team-logo" />}
                     {match.home_team} <span>vs</span>{" "}
@@ -98,9 +116,14 @@ export default function PartidosPage() {
                   <ArrowUpRight size={16} />
                 </div>
               </Link>
-            ))}
-          </div>
-        ))}
+                ))}
+                </div>
+              </div>
+            ) : (
+              <div className="empty-state competition-prompt">Selecciona una competición para desplegar sus partidos.</div>
+            )}
+          </>
+        )}
       </section>
       <ResponsibleNote />
     </AppShell>

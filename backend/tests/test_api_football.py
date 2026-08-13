@@ -372,6 +372,58 @@ def test_probable_lineup_uses_most_common_formation_and_regular_starters():
     assert lineups.away is None
 
 
+def test_probable_lineup_excludes_confirmed_absence_and_uses_next_regular_starter():
+    provider = APIFootballProvider(key="dummy_key")
+
+    def historical_lineup(player_ids: list[int]) -> dict:
+        return {
+            "lineups": [
+                {
+                    "team": {"id": 10, "name": "Local"},
+                    "formation": "4-3-3",
+                    "startXI": [
+                        {
+                            "player": {
+                                "id": player_id,
+                                "name": f"Jugador {player_id}",
+                                "number": player_id,
+                                "pos": "M",
+                            }
+                        }
+                        for player_id in player_ids
+                    ],
+                }
+            ]
+        }
+
+    history = [
+        historical_lineup(list(range(1, 12))),
+        historical_lineup(list(range(1, 11)) + [12]),
+    ]
+    lineups = provider.get_probable_lineups(
+        history,
+        [],
+        home_team_id="10",
+        away_team_id="12",
+        home_team_name="Local",
+        away_team_name="Visitante",
+        injuries=[
+            InjuryItem(
+                player="Jugador 1",
+                team="Local",
+                reason="Lesión muscular",
+                status="Baja confirmada",
+            )
+        ],
+    )
+
+    assert lineups.home is not None
+    selected_ids = [player.id for player in lineups.home.start_xi]
+    assert 1 not in selected_ids
+    assert 12 in selected_ids
+    assert len(selected_ids) == 11
+
+
 def test_merge_lineups_keeps_team_level_confirmation_and_probable_opponent():
     provider = APIFootballProvider(key="dummy_key")
     confirmed_home = TeamLineup(
@@ -468,7 +520,7 @@ def test_recent_matches_use_one_batch_and_normalize_statistics(monkeypatch):
     history = provider.get_team_last_matches("10", limit=20)
 
     assert calls == [
-        ("fixtures", {"team": "10", "last": "5", "status": "FT-AET-PEN"}),
+        ("fixtures", {"team": "10", "last": "10", "status": "FT-AET-PEN"}),
         ("fixtures", {"ids": "1002-1001"}),
     ]
     assert [item["fixture"]["id"] for item in history] == [1002, 1001]

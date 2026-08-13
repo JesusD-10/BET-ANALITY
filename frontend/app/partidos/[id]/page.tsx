@@ -53,6 +53,32 @@ function lineupEvidence(lineup: TeamLineup): string {
   return "Publicación parcial del proveedor · aún no confirmada";
 }
 
+function FormationPitch({ lineup, side }: { lineup: TeamLineup; side: "home" | "away" }) {
+  const positionOrder = ["G", "D", "M", "F"];
+  const ordered = [...lineup.start_xi].sort((left, right) => {
+    const leftIndex = positionOrder.indexOf((left.pos || "F").toUpperCase());
+    const rightIndex = positionOrder.indexOf((right.pos || "F").toUpperCase());
+    return (leftIndex < 0 ? 4 : leftIndex) - (rightIndex < 0 ? 4 : rightIndex);
+  });
+  const rows = [ordered.slice(0, 1), ordered.slice(1, 5), ordered.slice(5, 8), ordered.slice(8, 11)];
+
+  return (
+    <div className={`formation-pitch formation-pitch-${side}`} aria-label={`Simulación 4-3-3 de ${lineup.team_name}`}>
+      <div className="pitch-halfway" aria-hidden="true" />
+      {rows.map((row, rowIndex) => (
+        <div className="formation-row" key={rowIndex}>
+          {row.map((player, playerIndex) => (
+            <div className="formation-player" key={`${player.id ?? player.name}-${playerIndex}`}>
+              <b>{player.number ?? "·"}</b>
+              <span>{player.name}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function MatchDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -64,6 +90,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
   const [retryVersion, setRetryVersion] = useState(0);
   const [activeTab, setActiveTab] = useState<DetailTab>("summary");
   const [activeH2HTab, setActiveH2HTab] = useState<H2HTab>("meetings");
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const assistantControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -78,6 +105,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
     setLoadingAnalysis(true);
     setActiveTab("summary");
     setActiveH2HTab("meetings");
+    setHistoryExpanded(false);
 
     getAnalysis(id, controller.signal)
       .then((result) => {
@@ -182,6 +210,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
   const {
     match,
     referee_info,
+    discipline,
     injuries,
     lineups,
     h2h_matches,
@@ -202,10 +231,11 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
     : activeH2HTab === "home"
       ? `Todavía no hay últimos partidos disponibles de ${match.home_team}.`
       : `Todavía no hay últimos partidos disponibles de ${match.away_team}.`;
+  const visibleHistory = selectedHistory.slice(0, historyExpanded ? 10 : 5);
   const h2hTabs: Array<{ id: H2HTab; label: string }> = [
-    { id: "meetings", label: "Últimos 5 enfrentamientos" },
-    { id: "home", label: `Últimos 5 ${match.home_team}` },
-    { id: "away", label: `Últimos 5 ${match.away_team}` },
+    { id: "meetings", label: "Enfrentamientos directos" },
+    { id: "home", label: match.home_team },
+    { id: "away", label: match.away_team },
   ];
 
   return (
@@ -258,6 +288,22 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
               {referee_info.fouls_per_game && <div>Faltas prom: <b>{referee_info.fouls_per_game} / partido</b></div>}
               {referee_info.tendency && <div style={{ marginTop: "0.3rem", fontStyle: "italic", color: "#fbbf24" }}>Tendencia: {referee_info.tendency}</div>}
             </div>
+          </div>
+        )}
+
+        {discipline && (
+          <div className="context-card discipline-card">
+            <div className="context-card-heading"><ShieldCheck size={20} /><h3>Faltas y tarjetas recientes</h3></div>
+            {[discipline.home, discipline.away].filter(Boolean).map((team) => team && (
+              <div className="discipline-team" key={team.team_name}>
+                <strong>{team.team_name}</strong>
+                <span>{team.fouls_avg ?? "N/D"}<small>faltas</small></span>
+                <span>{team.yellow_cards_avg ?? "N/D"}<small>amarillas</small></span>
+                <span>{team.red_cards_avg ?? "N/D"}<small>rojas</small></span>
+                <em>{team.sample_size} partidos con datos</em>
+              </div>
+            ))}
+            <p>{discipline.note}</p>
           </div>
         )}
 
@@ -435,6 +481,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
           </h2>
         </div>
         {lineups?.note && <p style={{ opacity: 0.82, marginTop: 0 }}>{lineups.note}</p>}
+        <p className="formation-caption">Simulación visual 4-3-3. Si el proveedor publica otra formación, se conserva como dato informativo del equipo.</p>
         {lineups?.home || lineups?.away ? (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "1.5rem" }}>
             {lineups.home && (
@@ -444,13 +491,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                 </h3>
                 {lineups.home.coach && <small style={{ display: "block", marginBottom: "0.6rem" }}>DT: {lineups.home.coach}</small>}
                 <small style={{ display: "block", marginBottom: "0.6rem", opacity: 0.75 }}>{lineupEvidence(lineups.home)}</small>
-                <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "0.9rem" }}>
-                  {lineups.home.start_xi.map((p, i) => (
-                    <li key={i} style={{ padding: "0.25rem 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                      <b>#{p.number || i + 1}</b> {p.name} <small style={{ opacity: 0.6 }}>({p.pos || "TIT"})</small>
-                    </li>
-                  ))}
-                </ul>
+                <FormationPitch lineup={lineups.home} side="home" />
               </div>
             )}
             {lineups.away && (
@@ -460,13 +501,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                 </h3>
                 {lineups.away.coach && <small style={{ display: "block", marginBottom: "0.6rem" }}>DT: {lineups.away.coach}</small>}
                 <small style={{ display: "block", marginBottom: "0.6rem", opacity: 0.75 }}>{lineupEvidence(lineups.away)}</small>
-                <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "0.9rem" }}>
-                  {lineups.away.start_xi.map((p, i) => (
-                    <li key={i} style={{ padding: "0.25rem 0", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                      <b>#{p.number || i + 1}</b> {p.name} <small style={{ opacity: 0.6 }}>({p.pos || "TIT"})</small>
-                    </li>
-                  ))}
-                </ul>
+                <FormationPitch lineup={lineups.away} side="away" />
               </div>
             )}
           </div>
@@ -495,7 +530,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
               aria-selected={activeH2HTab === tab.id}
               aria-controls={`h2h-panel-${tab.id}`}
               tabIndex={activeH2HTab === tab.id ? 0 : -1}
-              onClick={() => setActiveH2HTab(tab.id)}
+              onClick={() => { setActiveH2HTab(tab.id); setHistoryExpanded(false); }}
               onKeyDown={(event) => {
                 let nextIndex: number | null = null;
                 if (event.key === "ArrowRight") nextIndex = (index + 1) % h2hTabs.length;
@@ -505,6 +540,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                 if (nextIndex === null) return;
                 event.preventDefault();
                 setActiveH2HTab(h2hTabs[nextIndex].id);
+                setHistoryExpanded(false);
                 event.currentTarget.parentElement
                   ?.querySelectorAll<HTMLButtonElement>("[role='tab']")
                   [nextIndex]?.focus();
@@ -526,7 +562,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
           <div className="empty-state">{historyEmptyMessage}</div>
         ) : (
           <div className="history-match-list">
-            {selectedHistory.slice(0, 5).map((historyMatch, idx) => (
+            {visibleHistory.map((historyMatch, idx) => (
               <div className="history-match-row" key={`${historyMatch.date}-${historyMatch.home_team}-${historyMatch.away_team}-${idx}`}>
                 <span>
                   <small>{historyMatch.date}</small>
@@ -535,6 +571,11 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                 <strong>{historyMatch.score}</strong>
               </div>
             ))}
+            {selectedHistory.length > 5 && (
+              <button className="history-more-button" type="button" onClick={() => setHistoryExpanded((value) => !value)}>
+                {historyExpanded ? "Mostrar sólo los 5 más recientes" : `Ver ${Math.min(5, selectedHistory.length - 5)} partidos anteriores`}
+              </button>
+            )}
           </div>
         )}
         </div>

@@ -270,7 +270,7 @@ class APIFootballProvider:
         limit: int = 5,
         enrich: bool = True,
     ) -> list[dict]:
-        """Return up to five recent fixtures enriched with canonical statistics.
+        """Return recent completed fixtures enriched with canonical statistics.
 
         The regular ``team`` lookup does not always embed statistics and player
         performance. API-Sports can return those blocks for multiple fixture
@@ -278,7 +278,7 @@ class APIFootballProvider:
         match. If that optional enrichment fails, the base fixture history is
         still useful and is returned unchanged.
         """
-        bounded_limit = max(1, min(limit, 5))
+        bounded_limit = max(1, min(limit, 10))
         data = self._request(
             "fixtures",
             params={"team": team_id, "last": str(bounded_limit), "status": "FT-AET-PEN"},
@@ -494,7 +494,7 @@ class APIFootballProvider:
 
     def get_head_to_head(self, team1_id: str, team2_id: str, limit: int = 5) -> list[H2HMatchItem]:
         h2h_param = f"{team1_id}-{team2_id}"
-        bounded_limit = max(1, min(limit, 5))
+        bounded_limit = max(1, min(limit, 10))
         data = self._request(
             "fixtures/headtohead",
             params={
@@ -699,11 +699,13 @@ class APIFootballProvider:
         history: list[dict],
         team_id: str | None,
         team_name: str,
+        excluded_player_names: set[str] | None = None,
     ) -> TeamLineup | None:
         """Estimate the usual XI from starts in the five most recent fixtures."""
 
         normalized_team_id = str(team_id) if team_id is not None else None
         normalized_team_name = team_name.strip().casefold()
+        excluded = {name.strip().casefold() for name in excluded_player_names or set()}
         formation_counts: dict[str, int] = {}
         formation_recency: dict[str, int] = {}
         player_counts: dict[str, int] = {}
@@ -742,6 +744,8 @@ class APIFootballProvider:
                 formation_counts[parsed.formation] = formation_counts.get(parsed.formation, 0) + 1
                 formation_recency.setdefault(parsed.formation, recency)
             for player in parsed.start_xi:
+                if player.name.strip().casefold() in excluded:
+                    continue
                 key = f"id:{player.id}" if player.id is not None else f"name:{player.name.casefold()}"
                 player_counts[key] = player_counts.get(key, 0) + 1
                 player_recency.setdefault(key, recency)
@@ -756,7 +760,7 @@ class APIFootballProvider:
                 key=lambda value: (formation_counts[value], -formation_recency[value]),
             )
             if formation_counts
-            else None
+            else "4-3-3"
         )
         ranked_player_keys = sorted(
             players,
@@ -790,9 +794,33 @@ class APIFootballProvider:
         away_team_id: str | None,
         home_team_name: str,
         away_team_name: str,
+        injuries: list[InjuryItem] | None = None,
     ) -> LineupsSummary:
-        home = cls._probable_team_lineup(home_history, home_team_id, home_team_name)
-        away = cls._probable_team_lineup(away_history, away_team_id, away_team_name)
+        injuries = injuries or []
+        home_excluded = {
+            injury.player
+            for injury in injuries
+            if injury.team.strip().casefold() == home_team_name.strip().casefold()
+            and injury.status.casefold() != "duda"
+        }
+        away_excluded = {
+            injury.player
+            for injury in injuries
+            if injury.team.strip().casefold() == away_team_name.strip().casefold()
+            and injury.status.casefold() != "duda"
+        }
+        home = cls._probable_team_lineup(
+            home_history,
+            home_team_id,
+            home_team_name,
+            home_excluded,
+        )
+        away = cls._probable_team_lineup(
+            away_history,
+            away_team_id,
+            away_team_name,
+            away_excluded,
+        )
         has_estimate = home is not None or away is not None
         return LineupsSummary(
             confirmed=False,
@@ -800,7 +828,7 @@ class APIFootballProvider:
             away=away,
             status="probable" if has_estimate else "pending",
             note=(
-                "Estimación basada en titulares y formaciones de los últimos cinco partidos disponibles."
+                "Estimación basada en titulares y formaciones recientes; las bajas confirmadas se excluyen del once probable."
                 if has_estimate
                 else "No hay suficiente historial de alineaciones para estimar el once habitual."
             ),

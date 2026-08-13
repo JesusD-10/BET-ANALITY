@@ -7,11 +7,11 @@ Plataforma web de inteligencia deportiva para el análisis avanzado de partidos 
 ## 🚀 Características Principales
 
 - ⚽ **Catálogo con triple respaldo automático**: la cadena predeterminada es API-Football → Sportmonks → Football-Data.org. Ante credenciales rechazadas, límite de cuota, timeout, error de red, respuesta inválida o una agenda vacía se prueba el siguiente proveedor; la fuente efectiva siempre se identifica.
-- 🏟️ **Portada curada por liga**: muestra hasta 12 partidos de clubes y selecciones populares, con máximo 4 por competición. La búsqueda y `/partidos` conservan acceso al catálogo completo.
-- 📊 **Estadísticas e Histórico**: Tres vistas independientes con los últimos 5 H2H, los últimos 5 partidos del local y los últimos 5 del visitante.
-- 🟨 **Análisis del Árbitro Asignado**: Estadísticas de amonestaciones (tarjetas amarillas/rojas), faltas por partido y tendencias disciplinarias.
+- 🏟️ **Portada curada por liga**: muestra únicamente partidos en curso o futuros de clubes y selecciones populares, con máximo 4 por competición. En `/partidos` primero se elige la competición y después se despliega su agenda, al estilo de un marcador deportivo.
+- 📊 **Estadísticas e Histórico**: Tres vistas independientes muestran primero los últimos 5 H2H, los últimos 5 partidos del local y los últimos 5 del visitante; cada vista permite desplegar hasta 5 encuentros anteriores adicionales.
+- 🟨 **Disciplina y árbitro**: identifica al árbitro asignado y calcula por separado los promedios recientes verificados de faltas, amarillas y rojas de cada equipo. Si la API no entrega métricas históricas del árbitro, se indica `N/D` en vez de inventarlas.
 - 🚑 **Lesionados y Sancionados**: Detección de bajas confirmadas o dudas clave en la plantilla y evaluación de su impacto táctico.
-- 📋 **Alineaciones y Formaciones**: Once probable calculado desde el uso reciente; desde T-60 se consulta el dato oficial y solo se confirma un equipo cuando el proveedor entrega formación y 11 titulares válidos.
+- 📋 **Alineaciones y Formaciones**: once probable calculado desde titulares y formaciones recientes, excluyendo bajas confirmadas; desde T-60 se consulta el dato oficial y solo se confirma un equipo cuando el proveedor entrega formación y 11 titulares válidos. Ambos onces se representan sobre una simulación visual 4-3-3.
 - 🤖 **Motor multi-IA** (xAI/Grok, DeepSeek, Cerebras y OpenRouter):
   - Contrasta en paralelo hasta cuatro proveedores para cada análisis y acepta resultados parciales dentro de un plazo común.
   - Mantiene un motor local cuando no hay claves, cuota o respuesta externa.
@@ -147,9 +147,13 @@ Las referencias canónicas son la
 [documentación oficial API-Football v3](https://www.api-football.com/documentation-v3),
 los [fixtures de Sportmonks Football API v3](https://docs.sportmonks.com/v3/endpoints-and-entities/endpoints/fixtures/get-fixtures-by-date)
 y la [API v4 de Football-Data.org](https://www.football-data.org/documentation/quickstart).
-El adaptador agrupa hasta cinco IDs mediante `fixtures?ids=...` para obtener los
+El adaptador agrupa hasta veinte IDs mediante `fixtures?ids=...` para obtener los
 bloques disponibles de estadísticas y jugadores sin multiplicar llamadas. Los
 campos `null` se consideran datos no disponibles, nunca valores cero.
+El historial usa `fixtures/headtohead?h2h={local}-{visitante}&last=10` para los
+enfrentamientos directos y `fixtures?team={id}&last=10&status=FT-AET-PEN` para
+la forma reciente de cada equipo. La interfaz muestra cinco inicialmente y
+permite desplegar los cinco anteriores sin una segunda espera.
 En el detalle se consulta `odds?fixture=...` y solo se aplican cotizaciones que
 coinciden exactamente con mercado, selección, línea y periodo; las combinadas
 generadas conservan su cuota justa y nunca multiplican precios individuales.

@@ -10,12 +10,14 @@ import httpx
 
 from app.core.config import settings
 from app.schemas.matches import (
+    DisciplineSummary,
     H2HMatchItem,
     InjuryItem,
     MatchAnalysisResponse,
     MatchSummary,
     Recommendation,
     RefereeInfo,
+    TeamDisciplineAverage,
 )
 from app.services.ai_analyzer import analyze_match_with_ai
 from app.services.api_football import APIFootballAPIError, APIFootballProvider, BookmakerQuote
@@ -174,7 +176,7 @@ class FootballDataProvider:
     def get_team_last_matches(self, team_id: str, limit: int = 5) -> list[dict]:
         endpoint = f"{self.base_url}/teams/{team_id}/matches"
         try:
-            bounded_limit = max(1, min(limit, 5))
+            bounded_limit = max(1, min(limit, 10))
             res = httpx.get(
                 endpoint,
                 params={"status": "FINISHED", "limit": bounded_limit},
@@ -955,6 +957,92 @@ def _mock_histories(match: MatchSummary) -> tuple[list[H2HMatchItem], list[H2HMa
     return h2h, team_history(match.home_team, 0), team_history(match.away_team, 1)
 
 
+def _team_discipline_average(
+    history: list[dict],
+    *,
+    team_id: str | None,
+    team_name: str,
+) -> TeamDisciplineAverage:
+    """Average only verified team-level fixture statistics from the provider."""
+
+    normalized_id = str(team_id) if team_id is not None else None
+    normalized_name = team_name.strip().casefold()
+    samples: dict[str, list[float]] = {
+        "fouls": [],
+        "yellow_cards": [],
+        "red_cards": [],
+    }
+    fixture_samples = 0
+    for fixture in history:
+        statistics = fixture.get("statistics") or []
+        if not isinstance(statistics, list):
+            continue
+        selected: dict | None = None
+        for block in statistics:
+            if not isinstance(block, dict):
+                continue
+            team = block.get("team") or {}
+            block_id = str(team.get("id")) if isinstance(team, dict) and team.get("id") is not None else None
+            if block_id is None and block.get("participant_id") is not None:
+                block_id = str(block["participant_id"])
+            block_name = str(team.get("name") or "").strip().casefold() if isinstance(team, dict) else ""
+            if (normalized_id and block_id == normalized_id) or (
+                normalized_name and block_name == normalized_name
+            ):
+                selected = block
+                break
+        if selected is None:
+            continue
+        found = False
+        for metric in samples:
+            value = selected.get(metric)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                samples[metric].append(float(value))
+                found = True
+        if found:
+            fixture_samples += 1
+
+    def average(metric: str) -> float | None:
+        values = samples[metric]
+        return round(sum(values) / len(values), 2) if values else None
+
+    return TeamDisciplineAverage(
+        team_name=team_name,
+        sample_size=fixture_samples,
+        fouls_avg=average("fouls"),
+        yellow_cards_avg=average("yellow_cards"),
+        red_cards_avg=average("red_cards"),
+    )
+
+
+def _discipline_summary(
+    match: MatchSummary,
+    home_history: list[dict],
+    away_history: list[dict],
+) -> DisciplineSummary | None:
+    home = _team_discipline_average(
+        home_history,
+        team_id=match.home_team_id,
+        team_name=match.home_team,
+    )
+    away = _team_discipline_average(
+        away_history,
+        team_id=match.away_team_id,
+        team_name=match.away_team,
+    )
+    if home.sample_size == 0 and away.sample_size == 0:
+        return None
+    return DisciplineSummary(
+        home=home,
+        away=away,
+        note=(
+            "Promedios por equipo calculados únicamente con partidos recientes que "
+            "incluyen estadísticas verificadas. No representan el promedio histórico "
+            "del árbitro."
+        ),
+    )
+
+
 def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisResponse | None:
     cache_key = (match_id, use_external_ai)
     cached = _get_cached_analysis(cache_key)
@@ -978,6 +1066,7 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
     home_recent_matches: list[H2HMatchItem] = []
     away_recent_matches: list[H2HMatchItem] = []
     odds_quotes: dict[str, BookmakerQuote] = {}
+    discipline: DisciplineSummary | None = None
 
     provider = _provider_for_match_id(
         match.id,
@@ -1002,9 +1091,9 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
             home_future = None
             away_future = None
             if match.home_team_id and match.away_team_id:
-                h2h_future = executor.submit(provider.get_head_to_head, match.home_team_id, match.away_team_id, 5)
-                home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 5, False)
-                away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 5, False)
+                h2h_future = executor.submit(provider.get_head_to_head, match.home_team_id, match.away_team_id, 10)
+                home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 10, False)
+                away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 10, False)
 
             injuries = _future_value(injuries_future, [])
             lineups = _future_value(lineups_future, None)
@@ -1016,8 +1105,9 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
                 home_history,
                 away_history,
             )
-            home_recent_matches = provider.normalize_history(home_history, 5)
-            away_recent_matches = provider.normalize_history(away_history, 5)
+            home_recent_matches = provider.normalize_history(home_history, 10)
+            away_recent_matches = provider.normalize_history(away_history, 10)
+            discipline = _discipline_summary(match, home_history, away_history)
             probable_lineups = provider.get_probable_lineups(
                 home_history,
                 away_history,
@@ -1025,6 +1115,7 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
                 away_team_id=match.away_team_id,
                 home_team_name=match.home_team,
                 away_team_name=match.away_team,
+                injuries=injuries,
             )
             lineups = provider.merge_lineups(lineups, probable_lineups)
 
@@ -1035,36 +1126,37 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
                     provider.get_head_to_head,
                     match.home_team_id,
                     match.away_team_id,
-                    5,
+                    10,
                 )
                 if match.home_team_id and match.away_team_id
                 else None
             )
             home_future = (
-                executor.submit(provider.get_team_last_matches, match.home_team_id, 5)
+                executor.submit(provider.get_team_last_matches, match.home_team_id, 10)
                 if match.home_team_id
                 else None
             )
             away_future = (
-                executor.submit(provider.get_team_last_matches, match.away_team_id, 5)
+                executor.submit(provider.get_team_last_matches, match.away_team_id, 10)
                 if match.away_team_id
                 else None
             )
             h2h_matches = _future_value(h2h_future, [])
             home_history = _future_value(home_future, [])
             away_history = _future_value(away_future, [])
-            home_recent_matches = provider.normalize_history(home_history, 5)
-            away_recent_matches = provider.normalize_history(away_history, 5)
+            home_recent_matches = provider.normalize_history(home_history, 10)
+            away_recent_matches = provider.normalize_history(away_history, 10)
+            discipline = _discipline_summary(match, home_history, away_history)
     elif isinstance(provider, FootballDataProvider) and match.id.startswith("football-data-"):
         with ThreadPoolExecutor(max_workers=3) as executor:
             h2h_future = executor.submit(provider.get_head_to_head, match.id, 10)
-            home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 5) if match.home_team_id else None
-            away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 5) if match.away_team_id else None
+            home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 10) if match.home_team_id else None
+            away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 10) if match.away_team_id else None
             h2h_matches = _future_value(h2h_future, [])
             home_history = _future_value(home_future, [])
             away_history = _future_value(away_future, [])
-            home_recent_matches = provider.normalize_history(home_history, 5)
-            away_recent_matches = provider.normalize_history(away_history, 5)
+            home_recent_matches = provider.normalize_history(home_history, 10)
+            away_recent_matches = provider.normalize_history(away_history, 10)
     if match.source_provider == "mock":
         mock_h2h, mock_home_history, mock_away_history = _mock_histories(match)
         if not h2h_matches:
@@ -1112,8 +1204,9 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
         allow_external_ai=use_external_ai,
     )
     analysis = _apply_verified_market_odds(analysis, odds_quotes)
-    analysis.home_recent_matches = home_recent_matches[:5]
-    analysis.away_recent_matches = away_recent_matches[:5]
+    analysis.discipline = discipline
+    analysis.home_recent_matches = home_recent_matches[:10]
+    analysis.away_recent_matches = away_recent_matches[:10]
     _cache_set(_analysis_cache, cache_key, analysis)
     return analysis
 

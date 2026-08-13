@@ -19,6 +19,20 @@ class RefereeInfo(BaseModel):
     tendency: str | None = None  # ej: "Propenso a amonestar temprano"
 
 
+class TeamDisciplineAverage(BaseModel):
+    team_name: str
+    sample_size: int = 0
+    fouls_avg: float | None = None
+    yellow_cards_avg: float | None = None
+    red_cards_avg: float | None = None
+
+
+class DisciplineSummary(BaseModel):
+    home: TeamDisciplineAverage | None = None
+    away: TeamDisciplineAverage | None = None
+    note: str
+
+
 class PlayerLineup(BaseModel):
     id: int | None = None
     name: str
@@ -127,6 +141,7 @@ class MatchAnalysisResponse(BaseModel):
     model_version: str
     updated_at: datetime
     referee_info: RefereeInfo | None = None
+    discipline: DisciplineSummary | None = None
     injuries: list[InjuryItem] = []
     lineups: LineupsSummary | None = None
     h2h_matches: list[H2HMatchItem] = []

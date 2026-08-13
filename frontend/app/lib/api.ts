@@ -110,6 +110,20 @@ export type TeamLineup = {
   sample_size?: number | null;
 };
 
+export type TeamDisciplineAverage = {
+  team_name: string;
+  sample_size: number;
+  fouls_avg?: number | null;
+  yellow_cards_avg?: number | null;
+  red_cards_avg?: number | null;
+};
+
+export type DisciplineSummary = {
+  home?: TeamDisciplineAverage | null;
+  away?: TeamDisciplineAverage | null;
+  note: string;
+};
+
 export type LineupsSummary = {
   confirmed: boolean;
   home?: TeamLineup | null;
@@ -190,6 +204,7 @@ export type Analysis = {
   model_version: string;
   updated_at: string;
   referee_info?: RefereeInfo | null;
+  discipline?: DisciplineSummary | null;
   injuries: Injury[];
   lineups?: LineupsSummary | null;
   h2h_matches: H2HMatch[];

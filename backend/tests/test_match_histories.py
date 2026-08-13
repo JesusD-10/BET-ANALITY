@@ -33,7 +33,7 @@ def _football_data_fixture(day: int, away_goals: int | None = 0) -> dict:
     }
 
 
-def test_api_football_normalizes_recent_matches_and_caps_them_to_five(monkeypatch) -> None:
+def test_api_football_normalizes_recent_matches_and_caps_request_to_ten(monkeypatch) -> None:
     payload = {
         "response": [
             _api_football_fixture(2),
@@ -59,7 +59,7 @@ def test_api_football_normalizes_recent_matches_and_caps_them_to_five(monkeypatc
     assert calls == [
         {
             "endpoint": "fixtures",
-            "params": {"team": "42", "last": "5", "status": "FT-AET-PEN"},
+            "params": {"team": "42", "last": "10", "status": "FT-AET-PEN"},
         }
     ]
     assert len(history) == 5
@@ -133,7 +133,7 @@ def test_football_data_normalizes_recent_matches_and_caps_request(monkeypatch) -
     raw_history = provider.get_team_last_matches("7", limit=30)
     history = provider.normalize_history(raw_history, 5)
 
-    assert captured["params"] == {"status": "FINISHED", "limit": 5}
+    assert captured["params"] == {"status": "FINISHED", "limit": 10}
     assert len(history) == 5
     assert [item.date for item in history] == [
         "2026-07-07",
@@ -143,6 +143,42 @@ def test_football_data_normalizes_recent_matches_and_caps_request(monkeypatch) -
         "2026-07-03",
     ]
     assert provider.normalize_history([_football_data_fixture(1, away_goals=None)], 5) == []
+
+
+def test_team_discipline_average_uses_only_verified_available_statistics() -> None:
+    history = [
+        {
+            "statistics": [
+                {
+                    "team": {"id": 10, "name": "Local"},
+                    "fouls": 12,
+                    "yellow_cards": 3,
+                    "red_cards": 1,
+                }
+            ]
+        },
+        {
+            "statistics": [
+                {
+                    "team": {"id": 10, "name": "Local"},
+                    "fouls": 8,
+                    "yellow_cards": 1,
+                }
+            ]
+        },
+        {"statistics": [{"team": {"id": 99, "name": "Rival"}, "fouls": 30}]},
+    ]
+
+    result = matches_service._team_discipline_average(
+        history,
+        team_id="10",
+        team_name="Local",
+    )
+
+    assert result.sample_size == 2
+    assert result.fouls_avg == 10
+    assert result.yellow_cards_avg == 2
+    assert result.red_cards_avg == 1
 
 
 @pytest.fixture(autouse=True)
@@ -306,8 +342,8 @@ def test_football_data_analysis_routes_by_match_source_when_api_football_is_acti
     assert analysis is not None
     assert analysis.h2h_matches == h2h
     h2h_call.assert_called_once_with(match.id, 10)
-    home_call.assert_called_once_with("11", 5)
-    away_call.assert_called_once_with("12", 5)
+    home_call.assert_called_once_with("11", 10)
+    away_call.assert_called_once_with("12", 10)
 
 
 def test_mock_analysis_exposes_three_visibly_demo_history_sections(monkeypatch) -> None:
