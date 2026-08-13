@@ -119,8 +119,17 @@ Para activar toda la cadena en Render configura `API_FOOTBALL_KEY`,
 `SPORTMONKS_API_TOKEN` y `FOOTBALL_DATA_API_TOKEN`, manteniendo
 `SPORTS_DATA_PROVIDER=api-football`. Si API-Football falla, el backend prueba
 Sportmonks y deja Football-Data.org siempre como último respaldo. Una agenda
-vacía válida no se considera una caída del proveedor.
+vacía no se considera una caída, pero tampoco detiene la cadena: se consulta el
+siguiente proveedor hasta llegar a Football-Data.org.
 Los detalles e historiales se consultan después al proveedor que originó cada ID.
+
+Sportmonks sólo devuelve fixtures de las ligas incluidas en el plan asociado al
+token. Un `200` con `data: []` puede significar que ese plan no cubre partidos
+para la fecha seleccionada. La agenda solicita únicamente los includes
+esenciales `participants;league;state`; sede y árbitros se reservan para el
+detalle, reduciendo latencia y posibles restricciones del plan. Render registra
+fecha, zona horaria, cantidad bruta, cuota restante y nombre del plan, nunca el
+token.
 
 Cerebras ofrece un nivel gratuito y `openrouter/free` limita el enrutamiento a
 modelos gratuitos, sujeto a sus cuotas y disponibilidad. xAI/Grok y DeepSeek no

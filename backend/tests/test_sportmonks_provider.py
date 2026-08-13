@@ -171,6 +171,7 @@ def test_sportmonks_uses_bearer_header_and_maps_fixture(monkeypatch) -> None:
     assert "private-token" not in captured["url"]
     assert captured["params"]["timezone"] == "America/Lima"
     assert captured["params"]["per_page"] == 50
+    assert captured["params"]["include"] == "participants;league;state"
     assert fixtures[0].id == "sportmonks-9001"
     assert fixtures[0].external_id == "9001"
     assert fixtures[0].home_team == "Alianza Lima"
@@ -424,3 +425,18 @@ def test_sportmonks_selects_head_referee_even_when_not_first() -> None:
     ]
 
     assert SportmonksProvider._referee_name(referees) == "Head Official"
+
+
+def test_sportmonks_extracts_safe_subscription_plan_names() -> None:
+    subscription = [
+        {
+            "plans": [
+                {"plan": "Football Free Plan", "sport": "Football"},
+                {"plan": "Football Free Plan", "sport": "Football"},
+            ]
+        }
+    ]
+
+    assert SportmonksProvider._subscription_plan_names(subscription) == [
+        "Football Free Plan"
+    ]

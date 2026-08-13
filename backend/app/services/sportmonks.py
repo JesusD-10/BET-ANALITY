@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import logging
 import time
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.schemas.matches import H2HMatchItem, MatchSummary
+
+logger = logging.getLogger(__name__)
 
 
 SPORTS_TIMEZONE = ZoneInfo("America/Lima")
@@ -24,7 +27,10 @@ class SportmonksProvider:
     """
 
     provider_name = "sportmonks"
-    _FIXTURE_INCLUDES = "participants;league;state;venue;referees.type"
+    # Date listings only need relations required to render the agenda.
+    # Optional venue/official data belongs to the fixture detail request.
+    _AGENDA_INCLUDES = "participants;league;state"
+    _DETAIL_INCLUDES = "participants;league;state;venue;referees.type"
     _H2H_INCLUDES = "participants;league;state;scores"
     _HISTORY_INCLUDES = "participants;league;state;scores;statistics"
     # Official fixture statistic type IDs used by the betting taxonomy:
@@ -103,7 +109,7 @@ class SportmonksProvider:
             payload = self._request(
                 endpoint,
                 params={
-                    "include": self._FIXTURE_INCLUDES,
+                    "include": self._AGENDA_INCLUDES,
                     "timezone": SPORTS_TIMEZONE.key,
                     "per_page": 50,
                     "page": page,
@@ -114,6 +120,19 @@ class SportmonksProvider:
             if not isinstance(data, list):
                 raise SportmonksAPIError(
                     "Sportmonks devolvió una agenda sin una lista de partidos válida."
+                )
+            if page == 1:
+                rate_limit = payload.get("rate_limit") or {}
+                logger.info(
+                    "Sportmonks agenda date=%s timezone=%s raw_fixtures=%s "
+                    "rate_remaining=%s plans=%s.",
+                    selected_date.isoformat(),
+                    payload.get("timezone") or SPORTS_TIMEZONE.key,
+                    len(data),
+                    rate_limit.get("remaining")
+                    if isinstance(rate_limit, dict)
+                    else None,
+                    self._subscription_plan_names(payload.get("subscription")),
                 )
             for item in data:
                 if not isinstance(item, dict):
@@ -151,7 +170,7 @@ class SportmonksProvider:
             payload = self._request(
                 endpoint,
                 params={
-                    "include": self._FIXTURE_INCLUDES,
+                    "include": self._DETAIL_INCLUDES,
                     "timezone": SPORTS_TIMEZONE.key,
                 },
             )
@@ -167,6 +186,31 @@ class SportmonksProvider:
                 "Sportmonks devolvió un detalle de partido con formato inesperado."
             )
         return self._to_match_summary(data)
+
+    @staticmethod
+    def _subscription_plan_names(raw_subscription: object) -> list[str]:
+        """Extract non-secret plan names for Render diagnostics."""
+
+        if not isinstance(raw_subscription, list):
+            return []
+        names: list[str] = []
+        for subscription in raw_subscription:
+            if not isinstance(subscription, dict):
+                continue
+            plans = subscription.get("plans") or []
+            if not isinstance(plans, list):
+                continue
+            for plan in plans:
+                if not isinstance(plan, dict):
+                    continue
+                name = plan.get("plan") or plan.get("name")
+                if (
+                    isinstance(name, str)
+                    and name.strip()
+                    and name.strip() not in names
+                ):
+                    names.append(name.strip())
+        return names
 
     def get_head_to_head(
         self,
