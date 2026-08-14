@@ -42,6 +42,12 @@ const detailTabs: Array<{ id: DetailTab; label: string }> = [
   { id: "assistant", label: "Asistente" },
 ];
 
+const marketAnchorId = (marketKey: string) => `mercado-${marketKey.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
+function isDetailTab(value: string | null): value is DetailTab {
+  return detailTabs.some((tab) => tab.id === value);
+}
+
 function lineupEvidence(lineup: TeamLineup): string {
   if (lineup.confirmed) return "XI confirmado por el proveedor";
   if (lineup.source === "recent_form") {
@@ -89,6 +95,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
   const [loadingAnalysis, setLoadingAnalysis] = useState(true);
   const [retryVersion, setRetryVersion] = useState(0);
   const [activeTab, setActiveTab] = useState<DetailTab>("summary");
+  const [targetMarket, setTargetMarket] = useState<string | null>(null);
   const [activeH2HTab, setActiveH2HTab] = useState<H2HTab>("meetings");
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const assistantControllerRef = useRef<AbortController | null>(null);
@@ -103,7 +110,11 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
     setAnswer("");
     setLoadingAnswer(false);
     setLoadingAnalysis(true);
-    setActiveTab("summary");
+    const searchParams = new URLSearchParams(window.location.search);
+    const requestedMarket = searchParams.get("market");
+    const requestedTab = searchParams.get("tab");
+    setTargetMarket(requestedMarket);
+    setActiveTab(requestedMarket ? "summary" : isDetailTab(requestedTab) ? requestedTab : "summary");
     setActiveH2HTab("meetings");
     setHistoryExpanded(false);
 
@@ -137,6 +148,18 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       assistantControllerRef.current?.abort();
     };
   }, [id, retryVersion]);
+
+  useEffect(() => {
+    if (!analysis || activeTab !== "summary" || !targetMarket) return;
+
+    const timer = window.setTimeout(() => {
+      const target = document.getElementById(marketAnchorId(targetMarket));
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      target?.focus({ preventScroll: true });
+    }, 80);
+
+    return () => window.clearTimeout(timer);
+  }, [activeTab, analysis, targetMarket]);
 
   async function ask() {
     if (!question.trim()) return;
@@ -331,8 +354,15 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
             </div>
           </div>
           <div className="market-detail-list">
-            {markets.map((market) => (
-              <article className="market-detail" key={market.market_key}>
+            {markets.map((market) => {
+              const isTargetMarket = market.market_key === targetMarket;
+              return (
+              <article
+                className={`market-detail ${isTargetMarket ? "market-detail-target" : ""}`}
+                id={marketAnchorId(market.market_key)}
+                key={market.market_key}
+                tabIndex={isTargetMarket ? -1 : undefined}
+              >
                 <div className="market-title">
                   <div>
                     <small>{market.label}</small>
@@ -363,7 +393,8 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                   </div>
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
 
         </div>

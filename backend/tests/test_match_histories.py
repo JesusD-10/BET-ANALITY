@@ -91,6 +91,77 @@ def test_api_football_recent_form_excludes_unfinished_fixtures(monkeypatch) -> N
     assert history == [finished]
 
 
+def test_api_football_recent_form_retries_without_status_when_filtered_response_is_empty(
+    monkeypatch,
+) -> None:
+    finished = _api_football_fixture(5)
+    finished["fixture"]["status"] = {"short": "FT"}
+    calls: list[tuple[str, dict | None]] = []
+
+    def fake_request(self, endpoint: str, params: dict | None = None) -> dict:
+        calls.append((endpoint, params))
+        return {"response": [] if params and "status" in params else [finished]}
+
+    monkeypatch.setattr(APIFootballProvider, "_request", fake_request)
+
+    history = APIFootballProvider(key="test").get_team_last_matches(
+        "42",
+        enrich=False,
+    )
+
+    assert history == [finished]
+    assert calls == [
+        ("fixtures", {"team": "42", "last": "5", "status": "FT-AET-PEN"}),
+        ("fixtures", {"team": "42", "last": "5"}),
+    ]
+
+
+def test_api_football_h2h_uses_canonical_query_and_keeps_only_completed_rows(
+    monkeypatch,
+) -> None:
+    finished = _api_football_fixture(5)
+    finished["fixture"]["status"] = {"short": "FT"}
+    scheduled = _api_football_fixture(6, home_goals=0)
+    scheduled["fixture"]["status"] = {"short": "NS"}
+    calls: list[tuple[str, dict | None]] = []
+
+    def fake_request(self, endpoint: str, params: dict | None = None) -> dict:
+        calls.append((endpoint, params))
+        return {"response": [scheduled, finished]}
+
+    monkeypatch.setattr(APIFootballProvider, "_request", fake_request)
+
+    history = APIFootballProvider(key="test").get_head_to_head("10", "12")
+
+    assert [item.date for item in history] == ["2026-07-05"]
+    assert calls == [
+        (
+            "fixtures/headtohead",
+            {"h2h": "10-12", "last": "5"},
+        ),
+    ]
+
+
+def test_api_football_h2h_accepts_namespaced_team_ids_without_leaking_prefix(
+    monkeypatch,
+) -> None:
+    calls: list[dict | None] = []
+
+    def fake_request(self, endpoint: str, params: dict | None = None) -> dict:
+        calls.append(params)
+        return {"response": []}
+
+    monkeypatch.setattr(APIFootballProvider, "_request", fake_request)
+
+    history = APIFootballProvider(key="test").get_head_to_head(
+        "api-football-10",
+        "api-football-12",
+    )
+
+    assert history == []
+    assert calls == [{"h2h": "10-12", "last": "5"}]
+
+
 def test_published_lineups_are_requested_only_close_to_kickoff() -> None:
     now = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
     match = MatchSummary(
@@ -143,6 +214,22 @@ def test_football_data_normalizes_recent_matches_and_caps_request(monkeypatch) -
         "2026-07-03",
     ]
     assert provider.normalize_history([_football_data_fixture(1, away_goals=None)], 5) == []
+
+
+def test_football_data_h2h_propagates_provider_errors_for_retry(monkeypatch) -> None:
+    def fake_get(endpoint: str, **kwargs):
+        return httpx.Response(
+            503,
+            request=httpx.Request("GET", endpoint),
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        FootballDataProvider("token", "https://example.test", 2).get_head_to_head(
+            "football-data-77",
+            10,
+        )
 
 
 def test_team_discipline_average_uses_only_verified_available_statistics() -> None:
@@ -344,6 +431,98 @@ def test_football_data_analysis_routes_by_match_source_when_api_football_is_acti
     h2h_call.assert_called_once_with(match.id, 10)
     home_call.assert_called_once_with("11", 10)
     away_call.assert_called_once_with("12", 10)
+
+
+def test_analysis_recovers_h2h_from_team_histories_when_direct_endpoint_is_empty(
+    monkeypatch,
+) -> None:
+    match = MatchSummary(
+        id="football-data-288",
+        external_id="288",
+        competition="Liga real",
+        kickoff_at=datetime(2026, 8, 20, 20, 0, tzinfo=timezone.utc),
+        home_team="Atlético Local",
+        away_team="Visitante FC",
+        home_team_id="11",
+        away_team_id="12",
+        status="PROGRAMADO",
+        source_provider="football-data",
+    )
+    shared_meeting = {
+        "id": 901,
+        "utcDate": "2026-06-01T20:00:00Z",
+        "competition": {"name": "Copa real"},
+        "homeTeam": {"id": 12, "name": "Visitante FC"},
+        "awayTeam": {"id": 11, "name": "Atletico Local"},
+        "score": {"fullTime": {"home": 1, "away": 2}},
+    }
+    unrelated = {
+        "id": 902,
+        "utcDate": "2026-07-01T20:00:00Z",
+        "competition": {"name": "Liga real"},
+        "homeTeam": {"id": 11, "name": "Atlético Local"},
+        "awayTeam": {"id": 99, "name": "Otro rival"},
+        "score": {"fullTime": {"home": 3, "away": 0}},
+    }
+    provider = FootballDataProvider("token", "https://example.test", 2)
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: provider)
+    monkeypatch.setattr(matches_service, "get_match", lambda match_id: match)
+
+    def unavailable_h2h(*args, **kwargs):
+        raise TimeoutError("endpoint H2H temporalmente no disponible")
+
+    monkeypatch.setattr(provider, "get_head_to_head", unavailable_h2h)
+
+    def team_history(team_id: str, limit: int = 5):
+        return [unrelated, shared_meeting] if team_id == "11" else [shared_meeting]
+
+    monkeypatch.setattr(provider, "get_team_last_matches", team_history)
+
+    analysis = matches_service.get_analysis(match.id, use_external_ai=False)
+
+    assert analysis is not None
+    assert len(analysis.h2h_matches) == 1
+    assert analysis.h2h_matches[0].date == "2026-06-01"
+    assert analysis.h2h_matches[0].score == "1 - 2"
+    assert (match.id, False) in matches_service._analysis_cache
+
+
+def test_transient_h2h_failure_is_not_cached_as_an_empty_history(monkeypatch) -> None:
+    match = MatchSummary(
+        id="football-data-388",
+        external_id="388",
+        competition="Liga real",
+        kickoff_at=datetime(2026, 8, 20, 20, 0, tzinfo=timezone.utc),
+        home_team="Local",
+        away_team="Visitante",
+        home_team_id="11",
+        away_team_id="12",
+        status="PROGRAMADO",
+        source_provider="football-data",
+    )
+    provider = FootballDataProvider("token", "https://example.test", 2)
+    recovered = provider.normalize_history([_football_data_fixture(1)], 1)
+    h2h_calls = 0
+
+    def flaky_h2h(*args, **kwargs):
+        nonlocal h2h_calls
+        h2h_calls += 1
+        if h2h_calls == 1:
+            raise TimeoutError("fallo temporal")
+        return recovered
+
+    monkeypatch.setattr(matches_service, "_active_provider", lambda: provider)
+    monkeypatch.setattr(matches_service, "get_match", lambda match_id: match)
+    monkeypatch.setattr(provider, "get_head_to_head", flaky_h2h)
+    monkeypatch.setattr(provider, "get_team_last_matches", lambda *args, **kwargs: [])
+
+    first = matches_service.get_analysis(match.id, use_external_ai=False)
+    assert first is not None and first.h2h_matches == []
+    assert (match.id, False) not in matches_service._analysis_cache
+
+    second = matches_service.get_analysis(match.id, use_external_ai=False)
+    assert second is not None and second.h2h_matches == recovered
+    assert h2h_calls == 2
 
 
 def test_mock_analysis_exposes_three_visibly_demo_history_sections(monkeypatch) -> None:

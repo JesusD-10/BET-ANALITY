@@ -1,6 +1,11 @@
+import math
+import re
+from itertools import combinations as iter_combinations
+
 from app.schemas.matches import (
     CombinationAnalysis,
     CombinationLeg,
+    DisciplineSummary,
     MarketAnalysis,
     MatchAnalysisResponse,
     MatchSummary,
@@ -11,6 +16,10 @@ from app.schemas.matches import (
 MIN_DREAM_PROBABILITY = 0.30
 MAX_DREAM_PROBABILITY = 1 / 3
 MIN_DREAM_REFERENCE_ODDS = 3.0
+MIN_COMBINATION_LEG_PROBABILITY = 0.55
+MIN_COMBINATION_PROBABILITY = 0.40
+MAX_COMBINATIONS_PER_MATCH = 8
+MAX_DREAMS_PER_MATCH = 8
 
 # Stable market-key families. New providers can expose these markets without a
 # response-schema migration; the analyzer only enables data-dependent families
@@ -56,112 +65,323 @@ def _fair_odds(probability: float) -> float:
     return round(1.0 / probability, 2)
 
 
-def _leg(market_key: str, label: str, selection: str) -> CombinationLeg:
-    return CombinationLeg(market_key=market_key, label=label, selection=selection)
-
-
-def _dream_probability(profile: int, offset: int = 0) -> float:
-    # 30%-33% keeps the model reference between 3.03 and 3.33.
-    return round(MIN_DREAM_PROBABILITY + ((profile + offset) % 4) * 0.01, 2)
-
-
-def _qualifying_single(markets: list[MarketAnalysis]) -> MarketAnalysis | None:
-    candidates: list[MarketAnalysis] = []
-    for market in markets:
-        reference_odds = market.best_odds if market.best_odds is not None else market.fair_odds
-        # A verified bookmaker quote can be 3+ even when fair odds are lower.
-        # The 1/3 ceiling only applies when fair_odds is the sole reference.
-        probability_is_eligible = market.probability >= MIN_DREAM_PROBABILITY
-        if market.best_odds is None:
-            probability_is_eligible = probability_is_eligible and market.probability <= MAX_DREAM_PROBABILITY
-        if probability_is_eligible and reference_odds >= MIN_DREAM_REFERENCE_ODDS:
-            candidates.append(market)
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: (item.probability, item.data_quality))
-
-
-def _build_advanced_market_builder(
-    match: MatchSummary,
-    markets: list[MarketAnalysis],
-    *,
-    require_dream_thresholds: bool = False,
-) -> CombinationAnalysis | None:
-    """Combine two already-gated advanced markets without fabricating prices.
-
-    ``markets`` is the validated analysis output, so this helper deliberately
-    does not infer availability from a referee, lineup, or team name. The 0.90
-    factor is a conservative dependency discount over the raw probability
-    product; it avoids presenting the legs as naively independent.
-    """
-
-    candidates: list[tuple[MarketAnalysis, str, int]] = []
-    for position, market in enumerate(markets):
-        family = market_family(market.market_key)
-        if family in DATA_DEPENDENT_MARKET_FAMILIES and market.probability >= 0.55:
-            candidates.append((market, family, position))
-
-    eligible_pairs: list[
-        tuple[tuple[float, float, int, int], MarketAnalysis, MarketAnalysis, float, float]
-    ] = []
-    for first_index, (first, first_family, first_position) in enumerate(candidates):
-        for second, second_family, second_position in candidates[first_index + 1 :]:
-            if first_family == second_family:
-                continue
-
-            joint_probability = round(first.probability * second.probability * 0.90, 4)
-            fair_odds = _fair_odds(joint_probability)
-            if require_dream_thresholds and not (
-                joint_probability >= MIN_DREAM_PROBABILITY
-                and fair_odds >= MIN_DREAM_REFERENCE_ODDS
-            ):
-                continue
-
-            # Prefer the pair whose weaker leg has the best data quality, then
-            # the larger adjusted probability. Input order breaks exact ties.
-            score = (
-                min(first.data_quality, second.data_quality),
-                joint_probability,
-                -first_position,
-                -second_position,
-            )
-            eligible_pairs.append((score, first, second, joint_probability, fair_odds))
-
-    if not eligible_pairs:
-        return None
-
-    _, first, second, joint_probability, fair_odds = max(
-        eligible_pairs,
-        key=lambda pair: pair[0],
+def _leg(market: MarketAnalysis) -> CombinationLeg:
+    return CombinationLeg(
+        market_key=market.market_key,
+        label=market.label,
+        selection=market.selection,
     )
-    factors_for = list(dict.fromkeys([*first.factors_for[:1], *second.factors_for[:1]]))
-    risks = list(dict.fromkeys([*first.risks[:1], *second.risks[:1]]))
 
-    return CombinationAnalysis(
-        id=(
-            f"{match.id}-advanced-{first.market_key.lower()}-"
-            f"{second.market_key.lower()}"
-        ),
-        label="Combinada avanzada respaldada",
-        selection=f"{first.selection} + {second.selection}",
-        legs=[
-            _leg(first.market_key, first.label, first.selection),
-            _leg(second.market_key, second.label, second.selection),
-        ],
-        probability=joint_probability,
-        fair_odds=fair_odds,
+
+def _selection_signature(value: object) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _poisson_at_most(rate: float, maximum: int) -> float:
+    """Return P(X <= maximum) for a Poisson rate without extra dependencies."""
+
+    return math.exp(-rate) * sum(rate**count / math.factorial(count) for count in range(maximum + 1))
+
+
+def _card_market_from_average(
+    match: MatchSummary,
+    average: float,
+    *,
+    factors_for: list[str],
+    quality_cap: float,
+) -> MarketAnalysis | None:
+    if not math.isfinite(average) or average <= 0:
+        return None
+
+    if average >= 4.6:
+        market_key = "TOTAL_CARDS_OVER_3_5"
+        selection = "Más de 3.5 tarjetas"
+        probability = 1.0 - _poisson_at_most(average, 3)
+    elif average >= 3.2:
+        market_key = "TOTAL_CARDS_OVER_2_5"
+        selection = "Más de 2.5 tarjetas"
+        probability = 1.0 - _poisson_at_most(average, 2)
+    else:
+        market_key = "TOTAL_CARDS_UNDER_4_5"
+        selection = "Menos de 4.5 tarjetas"
+        probability = _poisson_at_most(average, 4)
+
+    probability = round(max(0.05, min(0.95, probability)), 3)
+    data_quality = round(min(match.data_quality, quality_cap), 2)
+    return MarketAnalysis(
+        market_key=market_key,
+        label="Total de tarjetas",
+        selection=selection,
+        probability=probability,
+        fair_odds=_fair_odds(probability),
         best_odds=None,
         expected_value=None,
-        confidence="Media",
-        data_quality=round(min(first.data_quality, second.data_quality), 2),
-        factors_for=factors_for or ["Ambos mercados superaron el filtro estadístico del análisis"],
-        risks=risks or ["Las dos condiciones deben cumplirse en el mismo partido"],
-        correlation_note=(
-            "Probabilidad conjunta: producto de ambas probabilidades con un descuento "
-            "de dependencia de 0.90; no se presupone independencia plena."
+        confidence="Alta" if probability >= 0.75 and data_quality >= 0.7 else "Media-alta",
+        data_quality=data_quality,
+        factors_for=factors_for,
+        risks=[
+            "El promedio arbitral no garantiza el mismo volumen de tarjetas en este encuentro"
+        ],
+    )
+
+
+def _discipline_card_market(
+    match: MatchSummary,
+    discipline: DisciplineSummary | None,
+) -> MarketAnalysis | None:
+    if discipline is None or discipline.home is None or discipline.away is None:
+        return None
+    home = discipline.home
+    away = discipline.away
+    if (
+        home.yellow_cards_avg is None
+        or away.yellow_cards_avg is None
+        or home.sample_size <= 0
+        or away.sample_size <= 0
+    ):
+        return None
+    home_average = float(home.yellow_cards_avg)
+    away_average = float(away.yellow_cards_avg)
+    if not all(math.isfinite(value) and value >= 0 for value in (home_average, away_average)):
+        return None
+    total_average = home_average + away_average
+    minimum_sample = min(home.sample_size, away.sample_size)
+    quality_cap = min(0.84, 0.66 + minimum_sample * 0.03)
+    return _card_market_from_average(
+        match,
+        total_average,
+        factors_for=[
+            (
+                f"{home.team_name} promedia {home_average:.1f} amarillas en "
+                f"{home.sample_size} partidos con datos"
+            ),
+            (
+                f"{away.team_name} promedia {away_average:.1f} amarillas en "
+                f"{away.sample_size} partidos con datos"
+            ),
+        ],
+        quality_cap=quality_cap,
+    )
+
+
+def _referee_card_market(
+    match: MatchSummary,
+    referee_info: RefereeInfo | None,
+) -> MarketAnalysis | None:
+    """Turn an explicit referee average into one conservative card signal."""
+
+    if referee_info is None or referee_info.yellow_cards_avg is None:
+        return None
+    average = float(referee_info.yellow_cards_avg)
+    return _card_market_from_average(
+        match,
+        average,
+        factors_for=[
+            f"{referee_info.name} registra {average:.1f} amarillas por partido"
+        ],
+        quality_cap=0.78,
+    )
+
+
+def _evidence_markets(
+    match: MatchSummary,
+    referee_info: RefereeInfo | None,
+    markets: list[MarketAnalysis],
+    discipline: DisciplineSummary | None = None,
+) -> list[MarketAnalysis]:
+    """Keep unambiguous analyzed selections and add verified referee evidence.
+
+    If providers disagree on the selection represented by one key, that key is
+    discarded instead of arbitrarily choosing a side. An explicit card market
+    always takes precedence over the market derived from the referee average.
+    """
+
+    by_key: dict[str, dict[str, list[MarketAnalysis]]] = {}
+    order: list[str] = []
+    for market in markets:
+        market_key = market.market_key.strip().upper()
+        if market_family(market_key) is None:
+            continue
+        if market_key not in by_key:
+            by_key[market_key] = {}
+            order.append(market_key)
+        selection = _selection_signature(market.selection)
+        by_key[market_key].setdefault(selection, []).append(market)
+
+    result: list[MarketAnalysis] = []
+    for market_key in order:
+        selection_groups = by_key[market_key]
+        if len(selection_groups) != 1:
+            continue
+        candidates = next(iter(selection_groups.values()))
+        result.append(
+            max(
+                candidates,
+                key=lambda item: (item.data_quality, item.probability),
+            )
+        )
+
+    if not any(market_family(market.market_key) == "cards" for market in result):
+        derived_market = _discipline_card_market(match, discipline)
+        if derived_market is None:
+            derived_market = _referee_card_market(match, referee_info)
+        if derived_market is not None:
+            result.append(derived_market)
+    return result
+
+
+def _legs_signature(item: CombinationAnalysis) -> tuple[str, ...]:
+    return tuple(sorted(leg.market_key for leg in item.legs))
+
+
+def _joint_probability(
+    markets: tuple[MarketAnalysis, ...],
+    dependency_factor: float,
+) -> float:
+    probability = math.prod(market.probability for market in markets)
+    probability *= dependency_factor ** (len(markets) - 1)
+    return round(probability, 4)
+
+
+def _text_evidence(markets: tuple[MarketAnalysis, ...], field: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for market in markets:
+        for raw_value in getattr(market, field):
+            value = " ".join(raw_value.split())
+            signature = _selection_signature(value)
+            if value and signature not in seen:
+                seen.add(signature)
+                values.append(value)
+    return values
+
+
+def _combination_selection(markets: tuple[MarketAnalysis, ...]) -> str:
+    # Labels make short selections such as "Sí" or a team name understandable
+    # when the recommendation is rendered outside the match-analysis screen.
+    return " + ".join(f"{market.label}: {market.selection}" for market in markets)
+
+
+def _combination_id(
+    match: MatchSummary,
+    prefix: str,
+    markets: tuple[MarketAnalysis, ...],
+) -> str:
+    keys = "-".join(market.market_key.lower() for market in markets)
+    return f"{match.id}-{prefix}-{keys}"
+
+
+def _total_line(market_key: str) -> tuple[str, float] | None:
+    matched = re.fullmatch(
+        r"TOTAL_GOALS_(OVER|UNDER)_(\d+)_(\d+)",
+        market_key.strip().upper(),
+    )
+    if matched is None:
+        return None
+    return matched.group(1), float(f"{matched.group(2)}.{matched.group(3)}")
+
+
+def _goal_markets_are_compatible(
+    first: MarketAnalysis,
+    second: MarketAnalysis,
+) -> bool:
+    first_line = _total_line(first.market_key)
+    second_line = _total_line(second.market_key)
+    if first_line is not None and second_line is not None:
+        first_side, first_value = first_line
+        second_side, second_value = second_line
+        if first_side == second_side:
+            # Two overs or two unders are nested rather than additional legs.
+            return False
+        over_value = first_value if first_side == "OVER" else second_value
+        under_value = first_value if first_side == "UNDER" else second_value
+        return over_value < under_value
+
+    keys = {first.market_key.strip().upper(), second.market_key.strip().upper()}
+    if "BOTH_TEAMS_TO_SCORE" in keys:
+        total_market = second if first.market_key.strip().upper() == "BOTH_TEAMS_TO_SCORE" else first
+        total_line = _total_line(total_market.market_key)
+        btts_market = first if first.market_key.strip().upper() == "BOTH_TEAMS_TO_SCORE" else second
+        btts_yes = _selection_signature(btts_market.selection) in {"si", "sí", "yes"}
+        if total_line is not None and total_line[0] == "UNDER" and total_line[1] <= 1.5:
+            return not btts_yes
+        return True
+    return False
+
+
+def _group_is_compatible(markets: tuple[MarketAnalysis, ...]) -> bool:
+    if len({market.market_key.strip().upper() for market in markets}) != len(markets):
+        return False
+    for first, second in iter_combinations(markets, 2):
+        first_family = market_family(first.market_key)
+        second_family = market_family(second.market_key)
+        if first_family != second_family:
+            continue
+        if first_family != "goals" or not _goal_markets_are_compatible(first, second):
+            return False
+    return True
+
+
+def _compatible_groups(
+    markets: list[MarketAnalysis],
+    *,
+    minimum_leg_probability: float,
+) -> list[tuple[MarketAnalysis, ...]]:
+    eligible = [
+        market
+        for market in markets
+        if market.probability >= minimum_leg_probability
+        and market_family(market.market_key) is not None
+    ]
+    groups: list[tuple[MarketAnalysis, ...]] = []
+    for size in (2, 3):
+        for group in iter_combinations(eligible, size):
+            if _group_is_compatible(group):
+                groups.append(group)
+    return groups
+
+
+def _build_combination(
+    match: MatchSummary,
+    markets: tuple[MarketAnalysis, ...],
+    probability: float,
+) -> CombinationAnalysis:
+    advanced = any(
+        market_family(market.market_key) in DATA_DEPENDENT_MARKET_FAMILIES
+        for market in markets
+    )
+    data_quality = round(min(market.data_quality for market in markets), 2)
+    factors_for = _text_evidence(markets, "factors_for")
+    risks = _text_evidence(markets, "risks")
+    factor = 0.90
+    return CombinationAnalysis(
+        id=_combination_id(match, "builder", markets),
+        label=(
+            "Combinada avanzada respaldada"
+            if advanced
+            else "Combinada respaldada del partido"
         ),
-        kind="advanced-builder",
+        selection=_combination_selection(markets),
+        legs=[_leg(market) for market in markets],
+        probability=probability,
+        fair_odds=_fair_odds(probability),
+        best_odds=None,
+        expected_value=None,
+        confidence=(
+            "Media-alta"
+            if probability >= 0.50 and data_quality >= 0.70
+            else "Media"
+        ),
+        data_quality=data_quality,
+        factors_for=factors_for
+        or ["Todas las piernas proceden de mercados analizados para este partido"],
+        risks=risks or ["Todas las condiciones deben cumplirse en el mismo partido"],
+        correlation_note=(
+            f"Probabilidad conjunta calculada desde {len(markets)} señales del partido "
+            f"con ajuste conservador de dependencia {factor:.2f} por unión adicional; "
+            "no presupone independencia plena ni representa una cuota de casa."
+        ),
+        kind="advanced-builder" if advanced else "conservative-builder",
     )
 
 
@@ -169,200 +389,177 @@ def build_combinations(
     match: MatchSummary,
     referee_info: RefereeInfo | None,
     markets: list[MarketAnalysis] | None = None,
+    discipline: DisciplineSummary | None = None,
 ) -> list[CombinationAnalysis]:
-    """Build same-match combinations without inventing unsupported markets."""
+    """Build several high-coverage combinations from match evidence only."""
 
-    profile = sum(ord(char) for char in f"{match.home_team}:{match.away_team}")
-    referee_cards = referee_info.yellow_cards_avg if referee_info else None
-    result_goals_probability = round(0.66 + (profile % 5) * 0.01, 2)
+    evidence = _evidence_markets(match, referee_info, markets or [], discipline)
+    candidates: list[CombinationAnalysis] = []
+    for group in _compatible_groups(
+        evidence,
+        minimum_leg_probability=MIN_COMBINATION_LEG_PROBABILITY,
+    ):
+        probability = _joint_probability(group, dependency_factor=0.90)
+        if probability < MIN_COMBINATION_PROBABILITY:
+            continue
+        candidates.append(_build_combination(match, group, probability))
 
-    combinations = [
-        CombinationAnalysis(
-            id=f"{match.id}-builder-result-goals",
-            label="Combinada protegida",
-            selection=f"{match.home_team} o empate + al menos 1 gol",
-            legs=[
-                _leg("DOUBLE_CHANCE_HOME_DRAW", "Doble oportunidad", f"{match.home_team} o empate"),
-                _leg("TOTAL_GOALS_OVER_0_5", "Total de goles", "Más de 0.5 goles"),
-            ],
-            probability=result_goals_probability,
-            fair_odds=_fair_odds(result_goals_probability),
-            confidence="Media-alta" if match.home_form else "Media",
-            data_quality=max(0.55, round(match.data_quality * 0.92, 2)),
-            factors_for=[
-                "La doble oportunidad protege frente al empate",
-                "Un solo gol completa la segunda condición",
-            ],
-            risks=[f"Una derrota de {match.home_team} invalida la combinada"],
-            correlation_note="La probabilidad conjunta incluye un descuento por dependencia entre resultado y goles.",
-            kind="conservative-builder",
-        )
-    ]
+    candidates.sort(
+        key=lambda item: (
+            item.probability * item.data_quality,
+            item.probability,
+            len(item.legs),
+        ),
+        reverse=True,
+    )
+    unique: list[CombinationAnalysis] = []
+    seen: set[tuple[str, ...]] = set()
+    for candidate in candidates:
+        signature = _legs_signature(candidate)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(candidate)
+        if len(unique) >= MAX_COMBINATIONS_PER_MATCH:
+            break
+    return unique
 
-    # Cards are only offered when the backend received an actual referee metric.
-    if referee_cards is not None:
-        # The conservative builder keeps the requested floor of at least three
-        # cards; the higher dream builder below may use a stricter line.
-        card_line = "Más de 2.5 tarjetas"
-        card_key = "TOTAL_CARDS_OVER_2_5"
-        goal_cards_probability = round(0.70 + (profile % 4) * 0.01, 2)
-        combinations.insert(
-            0,
-            CombinationAnalysis(
-                id=f"{match.id}-builder-goal-cards",
-                label="Combinada de alta cobertura",
-                selection=f"Al menos 1 gol + {card_line.lower()}",
-                legs=[
-                    _leg("TOTAL_GOALS_OVER_0_5", "Total de goles", "Más de 0.5 goles"),
-                    _leg(card_key, "Total de tarjetas", card_line),
-                ],
-                probability=goal_cards_probability,
-                fair_odds=_fair_odds(goal_cards_probability),
-                confidence="Media-alta",
-                data_quality=max(0.55, round(match.data_quality * 0.94, 2)),
-                factors_for=[
-                    "El umbral de un gol cubre una amplia variedad de marcadores",
-                    f"El árbitro registra {referee_cards:.1f} amarillas por partido",
-                ],
-                risks=["Un partido muy abierto y permisivo puede reducir las tarjetas"],
-                correlation_note="Probabilidad conjunta ajustada; las piernas no se tratan como eventos independientes.",
-                kind="conservative-builder",
-            ),
-        )
 
-    advanced_builder = _build_advanced_market_builder(match, markets or [])
-    if advanced_builder is not None:
-        combinations.insert(0, advanced_builder)
+def _qualifying_singles(markets: list[MarketAnalysis]) -> list[MarketAnalysis]:
+    candidates: list[MarketAnalysis] = []
+    for market in markets:
+        reference_odds = market.best_odds if market.best_odds is not None else market.fair_odds
+        if market.probability < MIN_DREAM_PROBABILITY:
+            continue
+        if market.best_odds is None and market.probability > MAX_DREAM_PROBABILITY:
+            continue
+        if reference_odds < MIN_DREAM_REFERENCE_ODDS:
+            continue
+        if market.best_odds is not None and (
+            market.expected_value is None or market.expected_value < 0
+        ):
+            continue
+        candidates.append(market)
+    candidates.sort(
+        key=lambda item: (
+            item.best_odds is not None,
+            item.probability * item.data_quality,
+        ),
+        reverse=True,
+    )
+    return candidates
 
-    return combinations
+
+def _single_dream(match: MatchSummary, market: MarketAnalysis) -> CombinationAnalysis:
+    return CombinationAnalysis(
+        id=f"{match.id}-dream-single-{market.market_key.lower()}",
+        label="Soñadora individual",
+        selection=f"{market.label}: {market.selection}",
+        legs=[_leg(market)],
+        probability=market.probability,
+        fair_odds=market.fair_odds,
+        best_odds=market.best_odds,
+        expected_value=market.expected_value if market.best_odds is not None else None,
+        confidence=market.confidence,
+        data_quality=market.data_quality,
+        factors_for=market.factors_for,
+        risks=market.risks,
+        correlation_note="Selección simple; la cuota objetivo corresponde al mercado completo.",
+        kind="dream-single",
+    )
+
+
+def _dream_builder(
+    match: MatchSummary,
+    markets: tuple[MarketAnalysis, ...],
+    probability: float,
+    dependency_factor: float,
+) -> CombinationAnalysis:
+    data_quality = round(min(market.data_quality for market in markets), 2)
+    factors_for = _text_evidence(markets, "factors_for")
+    risks = _text_evidence(markets, "risks")
+    return CombinationAnalysis(
+        id=_combination_id(match, "dream-markets", markets),
+        label="Soñadora interpretada del partido",
+        selection=_combination_selection(markets),
+        legs=[_leg(market) for market in markets],
+        probability=probability,
+        fair_odds=_fair_odds(probability),
+        best_odds=None,
+        expected_value=None,
+        confidence="Media",
+        data_quality=data_quality,
+        factors_for=factors_for
+        or ["Todas las piernas proceden de mercados analizados para este partido"],
+        risks=risks or ["Todas las condiciones deben cumplirse en el mismo partido"],
+        correlation_note=(
+            f"Probabilidad conjunta calculada desde {len(markets)} señales del partido "
+            f"con ajuste conservador de dependencia {dependency_factor:.2f} por unión "
+            "adicional; no presupone independencia plena ni representa una cuota de casa."
+        ),
+        kind="dream-builder",
+    )
 
 
 def build_dream_picks(
     match: MatchSummary,
     referee_info: RefereeInfo | None,
     markets: list[MarketAnalysis] | None = None,
+    discipline: DisciplineSummary | None = None,
 ) -> list[CombinationAnalysis]:
-    """Return simple or combined dream picks with a whole-bet reference >= 3.
+    """Return all distinct 3+ dream picks supported by match evidence.
 
-    ``fair_odds`` represents the complete selection (all legs together), never
-    the price required from every individual leg. ``best_odds`` stays ``None``
-    for generated builders because no bookmaker quote was supplied.
+    Generated builders never multiply bookmaker prices. Their ``fair_odds`` is
+    the inverse of the modeled joint probability and ``best_odds`` remains
+    empty until a provider supplies an exact same-game-combination quote.
     """
 
-    profile = sum(ord(char) for char in f"dream:{match.home_team}:{match.away_team}")
-    dreams: list[CombinationAnalysis] = []
-    single = _qualifying_single(markets or [])
+    evidence = _evidence_markets(match, referee_info, markets or [], discipline)
+    dreams = [_single_dream(match, market) for market in _qualifying_singles(evidence)]
 
-    if single is not None:
-        dreams.append(
-            CombinationAnalysis(
-                id=f"{match.id}-dream-single-{single.market_key.lower()}",
-                label="Soñadora individual",
-                selection=single.selection,
-                legs=[_leg(single.market_key, single.label, single.selection)],
-                probability=single.probability,
-                fair_odds=single.fair_odds,
-                best_odds=single.best_odds,
-                expected_value=single.expected_value if single.best_odds is not None else None,
-                confidence=single.confidence,
-                data_quality=single.data_quality,
-                factors_for=single.factors_for,
-                risks=single.risks,
-                correlation_note="Selección simple: la cuota objetivo 3+ corresponde al mercado completo.",
-                kind="dream-single",
-            )
-        )
-
-    advanced_builder = _build_advanced_market_builder(
-        match,
-        markets or [],
-        require_dream_thresholds=True,
-    )
-    if advanced_builder is not None:
-        dreams.append(advanced_builder)
-
-    primary_probability = _dream_probability(profile)
-    if (
-        len(dreams) < 2
-        and referee_info
-        and referee_info.yellow_cards_avg is not None
+    for group in _compatible_groups(
+        evidence,
+        minimum_leg_probability=0.40,
     ):
-        referee_cards = referee_info.yellow_cards_avg
-        card_line = "Más de 3.5 tarjetas" if referee_cards >= 4.3 else "Más de 2.5 tarjetas"
-        card_key = "TOTAL_CARDS_OVER_3_5" if referee_cards >= 4.3 else "TOTAL_CARDS_OVER_2_5"
+        families = {market_family(market.market_key) for market in group}
+        dependency_factor = 0.82 if families == {"result", "goals"} else 0.85
+        probability = _joint_probability(group, dependency_factor=dependency_factor)
+        if not (
+            MIN_DREAM_PROBABILITY <= probability <= MAX_DREAM_PROBABILITY
+            and _fair_odds(probability) >= MIN_DREAM_REFERENCE_ODDS
+        ):
+            continue
         dreams.append(
-            CombinationAnalysis(
-                id=f"{match.id}-dream-goals-cards",
-                label="Soñadora combinada",
-                selection=f"2+ goles + {card_line.lower()}",
-                legs=[
-                    _leg("TOTAL_GOALS_OVER_1_5", "Total de goles", "Más de 1.5 goles"),
-                    _leg(card_key, "Total de tarjetas", card_line),
-                ],
-                probability=primary_probability,
-                fair_odds=_fair_odds(primary_probability),
-                confidence="Media",
-                data_quality=max(0.50, round(match.data_quality * 0.88, 2)),
-                factors_for=[
-                    "La cuota de referencia se calcula sobre las dos piernas juntas",
-                    f"El dato arbitral disponible es {referee_cards:.1f} amarillas por partido",
-                ],
-                risks=["Ambas condiciones deben cumplirse en el mismo encuentro"],
-                correlation_note="Cuota justa conjunta del modelo; no es una oferta confirmada de una casa.",
-                kind="dream-builder",
+            _dream_builder(
+                match,
+                group,
+                probability,
+                dependency_factor,
             )
         )
 
-    if len(dreams) < 2:
-        secondary_probability = _dream_probability(profile, offset=2)
-        dreams.append(
-            CombinationAnalysis(
-                id=f"{match.id}-dream-result-goals",
-                label="Soñadora combinada alternativa",
-                selection=f"{match.home_team} o empate + más de 2.5 goles",
-                legs=[
-                    _leg("DOUBLE_CHANCE_HOME_DRAW", "Doble oportunidad", f"{match.home_team} o empate"),
-                    _leg("TOTAL_GOALS_OVER_2_5", "Total de goles", "Más de 2.5 goles"),
-                ],
-                probability=secondary_probability,
-                fair_odds=_fair_odds(secondary_probability),
-                confidence="Media-baja",
-                data_quality=max(0.50, round(match.data_quality * 0.86, 2)),
-                factors_for=[
-                    "La selección combina resultado protegido y producción de goles",
-                    "La probabilidad conjunta modelada se mantiene en 30% o más",
-                ],
-                risks=[f"Una derrota de {match.home_team} o un partido de pocos goles invalida la selección"],
-                correlation_note="Selección de mayor varianza; la cuota justa pertenece a la combinada completa.",
-                kind="dream-builder",
-            )
-        )
-
-    # Keep the response compact while guaranteeing a useful alternative. A
-    # qualifying single takes one slot; otherwise two grounded builders do.
-    if len(dreams) == 1:
-        tertiary_probability = _dream_probability(profile, offset=1)
-        dreams.append(
-            CombinationAnalysis(
-                id=f"{match.id}-dream-btts-result",
-                label="Soñadora combinada de goles",
-                selection=f"Ambos equipos anotan + {match.away_team} o empate",
-                legs=[
-                    _leg("BOTH_TEAMS_TO_SCORE", "Ambos equipos anotan", "Sí"),
-                    _leg("DOUBLE_CHANCE_AWAY_DRAW", "Doble oportunidad", f"{match.away_team} o empate"),
-                ],
-                probability=tertiary_probability,
-                fair_odds=_fair_odds(tertiary_probability),
-                confidence="Media-baja",
-                data_quality=max(0.50, round(match.data_quality * 0.84, 2)),
-                factors_for=["Dos mercados generales disponibles con la información actual"],
-                risks=[f"{match.home_team} puede dejar al rival sin anotar o ganar el encuentro"],
-                correlation_note="Probabilidad conjunta ajustada por dependencia entre goles y resultado.",
-                kind="dream-builder",
-            )
-        )
-
-    return dreams[:2]
+    # Exact leg signatures are unique within a match. Do not truncate at two:
+    # the daily endpoint applies its own cross-match diversity and limit.
+    unique: list[CombinationAnalysis] = []
+    seen: set[tuple[str, ...]] = set()
+    for dream in sorted(
+        dreams,
+        key=lambda item: (
+            item.best_odds is not None,
+            item.data_quality,
+            -abs(item.probability - 0.315),
+            len(item.legs),
+        ),
+        reverse=True,
+    ):
+        signature = _legs_signature(dream)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(dream)
+        if len(unique) >= MAX_DREAMS_PER_MATCH:
+            break
+    return unique
 
 
 def enrich_analysis_with_opportunities(analysis: MatchAnalysisResponse) -> MatchAnalysisResponse:
@@ -370,6 +567,12 @@ def enrich_analysis_with_opportunities(analysis: MatchAnalysisResponse) -> Match
         analysis.match,
         analysis.referee_info,
         analysis.markets,
+        analysis.discipline,
     )
-    analysis.dream_picks = build_dream_picks(analysis.match, analysis.referee_info, analysis.markets)
+    analysis.dream_picks = build_dream_picks(
+        analysis.match,
+        analysis.referee_info,
+        analysis.markets,
+        analysis.discipline,
+    )
     return analysis

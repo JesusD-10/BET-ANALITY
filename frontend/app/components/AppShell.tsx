@@ -1,23 +1,88 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, BarChart3, CalendarDays, CircleAlert, Gauge, Sparkles } from "lucide-react";
+import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import {
+  Activity,
+  BarChart3,
+  CalendarDays,
+  CircleAlert,
+  Gauge,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Sparkles,
+} from "lucide-react";
 
-export default function AppShell({ children }: { children: React.ReactNode }) {
+const navigationItems = [
+  { href: "/", label: "Panorama", icon: BarChart3 },
+  { href: "/partidos", label: "Partidos", icon: CalendarDays },
+  { href: "/recomendaciones", label: "Recomendaciones", icon: Sparkles },
+  { href: "/sonadoras", label: "Soñadoras", icon: Sparkles },
+  { href: "/rendimiento", label: "Rendimiento", icon: Gauge },
+];
+
+function isCurrentSection(pathname: string, href: string) {
+  return href === "/" ? pathname === href : pathname.startsWith(href);
+}
+
+export default function AppShell({ children, contentId }: { children: React.ReactNode; contentId?: string }) {
+  const pathname = usePathname();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  useEffect(() => {
+    if (window.matchMedia("(max-width: 900px)").matches) setSidebarOpen(false);
+  }, []);
+
+  function closeOnSmallScreen() {
+    if (window.matchMedia("(max-width: 900px)").matches) setSidebarOpen(false);
+  }
+
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <Link className="brand-mark" href="/"><span>BA</span><div><strong>BET</strong><small>ANALIZADOR</small></div></Link>
-        <nav className="nav-list" aria-label="Navegacion principal">
-          <Link className="nav-item" href="/"><BarChart3 size={18} /> Panorama</Link>
-          <Link className="nav-item" href="/partidos"><CalendarDays size={18} /> Partidos</Link>
-          <Link className="nav-item" href="/recomendaciones"><Sparkles size={18} /> Recomendaciones</Link>
-          <Link className="nav-item" href="/sonadoras"><Sparkles size={18} /> Sonadoras</Link>
-          <Link className="nav-item" href="/rendimiento"><Gauge size={18} /> Rendimiento</Link>
+    <main className={`app-shell ${sidebarOpen ? "sidebar-open" : "sidebar-collapsed"}`}>
+      <aside className="sidebar" id="main-sidebar" aria-label="Menú de secciones">
+        <div className="sidebar-heading">
+          <Link className="brand-mark" href="/" onClick={closeOnSmallScreen}><span>BA</span><div><strong>BET</strong><small>ANALIZADOR</small></div></Link>
+          <button
+            className="sidebar-toggle"
+            type="button"
+            aria-expanded={sidebarOpen}
+            aria-controls="sidebar-navigation"
+            aria-label="Ocultar menú de secciones"
+            onClick={() => setSidebarOpen(false)}
+          >
+            <PanelLeftClose size={19} />
+          </button>
+        </div>
+        <nav className="nav-list" id="sidebar-navigation" aria-label="Navegación principal">
+          {navigationItems.map(({ href, label, icon: Icon }) => (
+            <Link
+              className={`nav-item ${isCurrentSection(pathname, href) ? "active" : ""}`}
+              href={href}
+              key={href}
+              aria-current={isCurrentSection(pathname, href) ? "page" : undefined}
+              onClick={closeOnSmallScreen}
+            >
+              <Icon size={18} /> {label}
+            </Link>
+          ))}
         </nav>
         <div className="sidebar-footer"><CircleAlert size={16} /><span>Analisis informativo.<br />Sin garantias.</span></div>
       </aside>
-      <section className="content">{children}</section>
+      {sidebarOpen && <button className="sidebar-backdrop" type="button" aria-label="Cerrar menú" onClick={() => setSidebarOpen(false)} />}
+      {!sidebarOpen && (
+        <button
+          className="sidebar-toggle sidebar-reopen"
+          type="button"
+          aria-expanded="false"
+          aria-controls="sidebar-navigation"
+          aria-label="Mostrar menú de secciones"
+          onClick={() => setSidebarOpen(true)}
+        >
+          <PanelLeftOpen size={20} />
+        </button>
+      )}
+      <section className="content" id={contentId}>{children}</section>
     </main>
   );
 }

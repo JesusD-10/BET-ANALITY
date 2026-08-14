@@ -5,6 +5,7 @@ import inspect
 import logging
 from threading import Lock
 import time
+import unicodedata
 from zoneinfo import ZoneInfo
 import httpx
 
@@ -162,33 +163,48 @@ class FootballDataProvider:
         return self._to_match(payload, endpoint)
 
     def get_head_to_head(self, match_id: str, limit: int = 10) -> list[H2HMatchItem]:
-        clean_id = match_id.replace("football-data-", "")
-        endpoint = f"{self.base_url}/matches/{clean_id}/head2head"
-        try:
-            bounded_limit = max(1, min(limit, 10))
-            res = httpx.get(endpoint, params={"limit": bounded_limit}, headers=self._headers(), timeout=self.timeout)
-            res.raise_for_status()
-            return self.normalize_history(res.json().get("matches", []), bounded_limit)
-        except Exception as exc:
-            logger.warning("Fallo al obtener H2H en football-data: %s", exc)
+        clean_id = match_id.removeprefix("football-data-")
+        if not clean_id.isdigit():
             return []
+        endpoint = f"{self.base_url}/matches/{clean_id}/head2head"
+        bounded_limit = max(1, min(limit, 10))
+        res = httpx.get(
+            endpoint,
+            params={"limit": bounded_limit},
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        res.raise_for_status()
+        payload = res.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("matches"), list):
+            raise FootballDataAPIError(
+                "Football-Data devolvió un historial H2H con formato inesperado."
+            )
+        return self.normalize_history(payload["matches"], bounded_limit)
 
     def get_team_last_matches(self, team_id: str, limit: int = 5) -> list[dict]:
-        endpoint = f"{self.base_url}/teams/{team_id}/matches"
-        try:
-            bounded_limit = max(1, min(limit, 10))
-            res = httpx.get(
-                endpoint,
-                params={"status": "FINISHED", "limit": bounded_limit},
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            res.raise_for_status()
-            raw_items = res.json().get("matches", [])
-            return sorted(raw_items, key=lambda item: str(item.get("utcDate") or ""), reverse=True)[:bounded_limit]
-        except Exception as exc:
-            logger.warning("Fallo al obtener partidos del equipo %s en football-data: %s", team_id, exc)
+        clean_id = str(team_id).removeprefix("football-data-")
+        if not clean_id.isdigit():
             return []
+        endpoint = f"{self.base_url}/teams/{clean_id}/matches"
+        bounded_limit = max(1, min(limit, 10))
+        res = httpx.get(
+            endpoint,
+            params={"status": "FINISHED", "limit": bounded_limit},
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        res.raise_for_status()
+        payload = res.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("matches"), list):
+            raise FootballDataAPIError(
+                "Football-Data devolvió un historial de equipo con formato inesperado."
+            )
+        return sorted(
+            payload["matches"],
+            key=lambda item: str(item.get("utcDate") or ""),
+            reverse=True,
+        )[:bounded_limit]
 
     @staticmethod
     def _history_item(item: dict) -> H2HMatchItem | None:
@@ -325,6 +341,8 @@ _provider_retry_after: dict[str, float] = {}
 _analysis_cache: dict[tuple[str, bool], tuple[float, MatchAnalysisResponse]] = {}
 _fixture_route_locks: dict[str, Lock] = {}
 _fixture_route_locks_guard = Lock()
+_recommendation_analysis_locks: dict[str, Lock] = {}
+_recommendation_analysis_locks_guard = Lock()
 
 
 class MatchProviderUnavailable(RuntimeError):
@@ -515,6 +533,11 @@ def _route_cache_key(providers: list[object], selected_date: date) -> str:
 def _fixture_route_lock(cache_key: str) -> Lock:
     with _fixture_route_locks_guard:
         return _fixture_route_locks.setdefault(cache_key, Lock())
+
+
+def _recommendation_analysis_lock(match_id: str) -> Lock:
+    with _recommendation_analysis_locks_guard:
+        return _recommendation_analysis_locks.setdefault(match_id, Lock())
 
 
 def _provider_retry_delay(exc: Exception) -> int:
@@ -853,6 +876,114 @@ def _future_value(future: Future | None, default):
         return default
 
 
+def _history_future_value(future: Future | None) -> tuple[list, bool]:
+    """Return history plus an explicit transient-failure flag.
+
+    An empty provider response is valid for teams without prior games. An
+    exception is not: callers use the flag to avoid caching that temporary
+    outage as an authoritative empty H2H for ten minutes.
+    """
+
+    if future is None:
+        return [], False
+    try:
+        value = future.result()
+        if not isinstance(value, list):
+            raise TypeError("El proveedor no devolvió una lista de historial")
+        return value, False
+    except Exception as exc:
+        logger.warning("Historial complementario no disponible: %s", exc)
+        return [], True
+
+
+def _history_team_key(value: object) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def _history_sides(item: dict) -> tuple[tuple[str | None, str], tuple[str | None, str]] | None:
+    """Extract home/away provider IDs and names from all supported payloads."""
+
+    teams = item.get("teams")
+    if isinstance(teams, dict):
+        home = teams.get("home") or {}
+        away = teams.get("away") or {}
+    elif isinstance(item.get("homeTeam"), dict) and isinstance(item.get("awayTeam"), dict):
+        home = item["homeTeam"]
+        away = item["awayTeam"]
+    else:
+        participants = item.get("participants")
+        if not isinstance(participants, list):
+            return None
+        by_location: dict[str, dict] = {}
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            location = str((participant.get("meta") or {}).get("location") or "").casefold()
+            if location in {"home", "away"}:
+                by_location[location] = participant
+        home = by_location.get("home") or {}
+        away = by_location.get("away") or {}
+
+    home_name = str(home.get("name") or "").strip()
+    away_name = str(away.get("name") or "").strip()
+    if not home_name or not away_name:
+        return None
+    home_id = str(home["id"]) if home.get("id") is not None else None
+    away_id = str(away["id"]) if away.get("id") is not None else None
+    return (home_id, home_name), (away_id, away_name)
+
+
+def _derive_h2h_from_team_histories(
+    match: MatchSummary,
+    provider: object,
+    *histories: list[dict],
+    limit: int = 10,
+) -> list[H2HMatchItem]:
+    """Recover direct meetings already present in either team's recent form."""
+
+    normalize = getattr(provider, "normalize_history", None)
+    if not callable(normalize):
+        return []
+
+    target_ids = {str(match.home_team_id), str(match.away_team_id)}
+    has_target_ids = bool(match.home_team_id and match.away_team_id)
+    target_names = {
+        _history_team_key(match.home_team),
+        _history_team_key(match.away_team),
+    }
+    recovered: list[H2HMatchItem] = []
+    seen: set[tuple[str, str, str, str]] = set()
+
+    for history in histories:
+        for raw_item in history:
+            if not isinstance(raw_item, dict):
+                continue
+            sides = _history_sides(raw_item)
+            if sides is None:
+                continue
+            raw_ids = {side[0] for side in sides}
+            raw_names = {_history_team_key(side[1]) for side in sides}
+            ids_match = has_target_ids and None not in raw_ids and raw_ids == target_ids
+            if not ids_match and raw_names != target_names:
+                continue
+            try:
+                normalized = normalize([raw_item], 1)
+            except Exception as exc:
+                logger.warning("No se pudo normalizar un respaldo H2H: %s", exc)
+                continue
+            if not normalized:
+                continue
+            item = normalized[0]
+            key = (item.date, item.home_team, item.away_team, item.score)
+            if key not in seen:
+                seen.add(key)
+                recovered.append(item)
+
+    recovered.sort(key=lambda item: item.date, reverse=True)
+    return recovered[: max(0, int(limit))]
+
+
 def _should_fetch_published_lineups(
     match: MatchSummary,
     now: datetime | None = None,
@@ -876,13 +1007,11 @@ def _apply_verified_market_odds(
     matched_quote = False
     for market in analysis.markets:
         quote = quotes.get(market.market_key)
-        if quote is None:
-            continue
-        if market.market_key == "BOTH_TEAMS_TO_SCORE" and market.selection.casefold() not in {
-            "sí",
-            "si",
-            "yes",
-        }:
+        if quote is None or not _selection_matches_market_key(
+            market.market_key,
+            market.selection,
+            analysis.match,
+        ):
             continue
         market.best_odds = quote.odds
         market.bookmaker = quote.bookmaker
@@ -891,6 +1020,49 @@ def _apply_verified_market_odds(
 
     # Rebuild dream picks so a verified 3+ price can qualify a simple market.
     return enrich_analysis_with_opportunities(analysis) if matched_quote else analysis
+
+
+def _selection_matches_market_key(
+    market_key: str,
+    selection: str,
+    match: MatchSummary,
+) -> bool:
+    """Validate that an interpreted selection matches an exact bookmaker key.
+
+    Quotes are indexed by the API-Football outcome (Over, Under, Home, Away,
+    etc.). An AI label must never receive that quote if its human-readable
+    selection describes the opposite side of the market.
+    """
+
+    normalized = unicodedata.normalize("NFKD", selection).casefold()
+    text = "".join(character for character in normalized if not unicodedata.combining(character))
+    compact = "".join(character for character in text if character.isalnum())
+    home = _history_team_key(match.home_team)
+    away = _history_team_key(match.away_team)
+
+    if "_OVER_" in market_key:
+        return "masde" in compact or "over" in compact
+    if "_UNDER_" in market_key:
+        return "menosde" in compact or "under" in compact
+    if market_key == "BOTH_TEAMS_TO_SCORE":
+        return compact in {"si", "yes", "ambosanotan", "ambosequiposanotan"}
+    if market_key == "WINNER_HOME":
+        return home in compact and not any(token in text for token in ("empate", "draw", " o "))
+    if market_key == "WINNER_AWAY":
+        return away in compact and not any(token in text for token in ("empate", "draw", " o "))
+    if market_key == "WINNER_DRAW":
+        return compact in {"empate", "draw", "x"}
+    if market_key == "DOUBLE_CHANCE_HOME_DRAW":
+        return home in compact and ("empate" in text or "draw" in text or compact.endswith("1x"))
+    if market_key == "DOUBLE_CHANCE_AWAY_DRAW":
+        return away in compact and ("empate" in text or "draw" in text or compact.endswith("x2"))
+    if market_key == "DOUBLE_CHANCE_HOME_AWAY":
+        return home in compact and away in compact
+    if "_HOME_" in market_key or market_key.endswith("_HOME"):
+        return home in compact or "local" in text
+    if "_AWAY_" in market_key or market_key.endswith("_AWAY"):
+        return away in compact or "visitante" in text
+    return True
 
 
 def _history_item(
@@ -1067,6 +1239,10 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
     away_recent_matches: list[H2HMatchItem] = []
     odds_quotes: dict[str, BookmakerQuote] = {}
     discipline: DisciplineSummary | None = None
+    h2h_failed = False
+    home_failed = False
+    away_failed = False
+    history_fetch_failed = False
 
     provider = _provider_for_match_id(
         match.id,
@@ -1097,9 +1273,10 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
 
             injuries = _future_value(injuries_future, [])
             lineups = _future_value(lineups_future, None)
-            h2h_matches = _future_value(h2h_future, [])
-            home_history = _future_value(home_future, [])
-            away_history = _future_value(away_future, [])
+            h2h_matches, h2h_failed = _history_future_value(h2h_future)
+            home_history, home_failed = _history_future_value(home_future)
+            away_history, away_failed = _history_future_value(away_future)
+            history_fetch_failed = h2h_failed or home_failed or away_failed
             odds_quotes = _future_value(odds_future, {})
             home_history, away_history = provider.enrich_fixture_histories(
                 home_history,
@@ -1141,9 +1318,10 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
                 if match.away_team_id
                 else None
             )
-            h2h_matches = _future_value(h2h_future, [])
-            home_history = _future_value(home_future, [])
-            away_history = _future_value(away_future, [])
+            h2h_matches, h2h_failed = _history_future_value(h2h_future)
+            home_history, home_failed = _history_future_value(home_future)
+            away_history, away_failed = _history_future_value(away_future)
+            history_fetch_failed = h2h_failed or home_failed or away_failed
             home_recent_matches = provider.normalize_history(home_history, 10)
             away_recent_matches = provider.normalize_history(away_history, 10)
             discipline = _discipline_summary(match, home_history, away_history)
@@ -1152,11 +1330,26 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
             h2h_future = executor.submit(provider.get_head_to_head, match.id, 10)
             home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 10) if match.home_team_id else None
             away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 10) if match.away_team_id else None
-            h2h_matches = _future_value(h2h_future, [])
-            home_history = _future_value(home_future, [])
-            away_history = _future_value(away_future, [])
+            h2h_matches, h2h_failed = _history_future_value(h2h_future)
+            home_history, home_failed = _history_future_value(home_future)
+            away_history, away_failed = _history_future_value(away_future)
+            history_fetch_failed = h2h_failed or home_failed or away_failed
             home_recent_matches = provider.normalize_history(home_history, 10)
             away_recent_matches = provider.normalize_history(away_history, 10)
+
+    if not h2h_matches and (home_history or away_history):
+        recovered_h2h = _derive_h2h_from_team_histories(
+            match,
+            provider,
+            home_history,
+            away_history,
+            limit=10,
+        )
+        if recovered_h2h:
+            h2h_matches = recovered_h2h
+            # A successful reconstruction fully replaces only the failed H2H
+            # call. Missing home/away form should still trigger a later retry.
+            history_fetch_failed = home_failed or away_failed
     if match.source_provider == "mock":
         mock_h2h, mock_home_history, mock_away_history = _mock_histories(match)
         if not h2h_matches:
@@ -1203,16 +1396,118 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
         # the AI calls share one bounded parallel window.
         allow_external_ai=use_external_ai,
     )
-    analysis = _apply_verified_market_odds(analysis, odds_quotes)
     analysis.discipline = discipline
+    # Discipline is assembled from enriched recent fixtures, after the base
+    # model has run. Rebuild opportunities now so card averages can participate
+    # in evidence-led combinations; the odds overlay then attaches only exact
+    # verified prices and performs one final rebuild if needed.
+    analysis = enrich_analysis_with_opportunities(analysis)
+    analysis = _apply_verified_market_odds(analysis, odds_quotes)
     analysis.home_recent_matches = home_recent_matches[:10]
     analysis.away_recent_matches = away_recent_matches[:10]
-    _cache_set(_analysis_cache, cache_key, analysis)
+    if not history_fetch_failed:
+        _cache_set(_analysis_cache, cache_key, analysis)
+    else:
+        logger.info(
+            "No se cachea el análisis de %s porque falló al menos una consulta de historial.",
+            match.id,
+        )
     return analysis
 
 
 def _quick_analysis(match: MatchSummary) -> MatchAnalysisResponse:
     return analyze_match_with_ai(match=match, allow_external_ai=False)
+
+
+def _recommendation_analysis(match: MatchSummary) -> MatchAnalysisResponse:
+    """Prefer already enriched match evidence without multiplying API calls.
+
+    Opening a match populates H2H, form and verified odds in the analysis cache.
+    Daily feeds reuse that exact interpretation. Fixtures not opened yet still
+    receive the deterministic per-match model, but this helper deliberately
+    does not fan out several upstream requests for every item in the agenda.
+    """
+
+    for cache_key in ((match.id, True), (match.id, False)):
+        cached = _get_cached_analysis(cache_key)
+        if cached is not None:
+            return cached
+
+    if match.source_provider == "mock":
+        h2h, home_history, away_history = _mock_histories(match)
+        return analyze_match_with_ai(
+            match=match,
+            h2h_matches=h2h,
+            home_last_matches=home_history,
+            away_last_matches=away_history,
+            allow_external_ai=False,
+        )
+
+    # Recommendations and Soñadoras are often requested in parallel by the
+    # home page. Serialize only the same fixture so they share the first
+    # completed local analysis instead of doubling provider quota.
+    with _recommendation_analysis_lock(match.id):
+        for cache_key in ((match.id, True), (match.id, False)):
+            cached = _get_cached_analysis(cache_key)
+            if cached is not None:
+                return cached
+        try:
+            enriched = get_analysis(match.id, use_external_ai=False)
+        except Exception as exc:
+            logger.warning(
+                "No se pudo enriquecer la recomendación de %s: %s",
+                match.id,
+                exc,
+            )
+            enriched = None
+        return enriched or _quick_analysis(match)
+
+
+def _recommendation_analyses(
+    matches: list[MatchSummary],
+) -> list[MatchAnalysisResponse]:
+    if not matches:
+        return []
+    if len(matches) == 1:
+        return [_recommendation_analysis(matches[0])]
+    with ThreadPoolExecutor(max_workers=min(4, len(matches))) as executor:
+        return list(executor.map(_recommendation_analysis, matches))
+
+
+def _market_recommendation_score(market, use_count: int = 0) -> float:
+    """Rank safety/evidence first and add only verified positive value."""
+
+    verified_value = max(0.0, market.expected_value or 0.0) if market.best_odds else 0.0
+    diversity_penalty = min(0.18, use_count * 0.055)
+    return market.probability * market.data_quality + verified_value * 0.08 - diversity_penalty
+
+
+def _recommendation_from_market(
+    analysis_data: MatchAnalysisResponse,
+    market,
+) -> Recommendation:
+    match = analysis_data.match
+    return Recommendation(
+        id=f"rec-{match.id}-{market.market_key.lower()}",
+        match_id=match.id,
+        match_label=f"{match.home_team} - {match.away_team}",
+        market=market.label,
+        selection=market.selection,
+        probability=market.probability,
+        fair_odds=market.fair_odds,
+        best_odds=market.best_odds,
+        expected_value=market.expected_value,
+        kind="simple",
+        rationale=(
+            market.factors_for[0]
+            if market.factors_for
+            else "Selección priorizada por probabilidad y calidad de datos de este partido"
+        ),
+        confidence=market.confidence,
+        data_quality=market.data_quality,
+        home_logo=match.home_logo,
+        away_logo=match.away_logo,
+    )
 
 
 def get_assistant_analysis_context(match_id: str | None) -> MatchAnalysisResponse | None:
@@ -1236,45 +1531,80 @@ def get_assistant_analysis_context(match_id: str | None) -> MatchAnalysisRespons
 
 
 def get_recommendations(limit: int | None = None) -> list[Recommendation]:
-    """Build the daily simple list without N external AI detail calls."""
+    """Return exactly one match-specific safe signal per fixture."""
+
+    matches = get_highlights()
+    candidate_count = min(len(matches), max(1, limit or len(matches)))
+    analyses = _recommendation_analyses(matches[:candidate_count])
     result: list[Recommendation] = []
-    for match in get_highlights():
-        analysis_data = _quick_analysis(match)
-        for index, market in enumerate(analysis_data.markets[:2]):
-            result.append(
-                Recommendation(
-                    id=f"rec-{analysis_data.match.id}-{index}",
-                    match_id=analysis_data.match.id,
-                    match_label=f"{analysis_data.match.home_team} - {analysis_data.match.away_team}",
-                    market=market.label,
-                    selection=market.selection,
-                    probability=market.probability,
-                    fair_odds=market.fair_odds,
-                    best_odds=market.best_odds,
-                    expected_value=market.expected_value,
-                    kind="simple",
-                    rationale=market.factors_for[0] if market.factors_for else "Respaldo estadístico de forma",
-                    confidence=market.confidence,
-                    data_quality=market.data_quality,
-                    home_logo=match.home_logo,
-                    away_logo=match.away_logo,
-                )
-            )
-    result.sort(key=lambda item: (item.probability * item.data_quality), reverse=True)
-    return result[:limit] if limit is not None else result
+    family_use_count: dict[str, int] = {}
+
+    for analysis_data in analyses:
+        if not analysis_data.markets:
+            continue
+        market = max(
+            analysis_data.markets,
+            key=lambda item: (
+                _market_recommendation_score(
+                    item,
+                    family_use_count.get(_recommendation_market_signature(item), 0),
+                ),
+                item.probability,
+            ),
+        )
+        result.append(_recommendation_from_market(analysis_data, market))
+        signature = _recommendation_market_signature(market)
+        family_use_count[signature] = family_use_count.get(signature, 0) + 1
+    return result
+
+
+def _recommendation_market_signature(market) -> str:
+    key = market.market_key.strip().upper()
+    family = key.split("_OVER_", 1)[0].split("_UNDER_", 1)[0]
+    if key == "BOTH_TEAMS_TO_SCORE":
+        side = _history_team_key(market.selection)
+    elif "_OVER_" in key:
+        side = "over"
+    elif "_UNDER_" in key:
+        side = "under"
+    else:
+        side = key
+    return f"{family}:{side}"
 
 
 def get_dream_recommendations(limit: int = 6) -> list[Recommendation]:
-    """Return diversified same-match dream builders for today's fixtures."""
-    analyses = [_quick_analysis(match) for match in get_highlights()]
-    result: list[Recommendation] = []
+    """Return several evidence-led dreams using fair cross-match rotation."""
 
-    # Round-robin keeps the home page from being dominated by one match.
-    for pick_index in range(2):
+    matches = get_highlights()
+    analyses = _recommendation_analyses(matches[: min(len(matches), max(1, limit))])
+    result: list[Recommendation] = []
+    remaining: dict[str, list] = {
+        analysis.match.id: list(analysis.dream_picks) for analysis in analyses
+    }
+    used_signatures: set[tuple[str, ...]] = set()
+
+    # Round-robin permits more than one pick per fixture without allowing the
+    # first match to consume the feed. Within each turn prefer a leg signature
+    # not already used globally. If the evidence contains no new structure we
+    # return fewer cards instead of filling the page with a repeated template.
+    while len(result) < limit and any(remaining.values()):
+        added = False
         for analysis_data in analyses:
-            if pick_index >= len(analysis_data.dream_picks):
+            candidates = [
+                item
+                for item in remaining[analysis_data.match.id]
+                if tuple(sorted(leg.market_key for leg in item.legs)) not in used_signatures
+            ]
+            if not candidates:
                 continue
-            dream = analysis_data.dream_picks[pick_index]
+            dream = max(
+                candidates,
+                key=lambda item: (
+                    item.data_quality,
+                    -abs(item.probability - 0.315),
+                ),
+            )
+            remaining[analysis_data.match.id].remove(dream)
             match = analysis_data.match
             result.append(
                 Recommendation(
@@ -1297,7 +1627,12 @@ def get_dream_recommendations(limit: int = 6) -> list[Recommendation]:
                     away_logo=match.away_logo,
                 )
             )
+            signature = tuple(sorted(leg.market_key for leg in dream.legs))
+            used_signatures.add(signature)
+            added = True
             if len(result) >= limit:
                 return result
+        if not added:
+            break
     return result
 

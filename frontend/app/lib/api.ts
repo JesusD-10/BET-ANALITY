@@ -1,4 +1,9 @@
-export const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "https://bet-anality.onrender.com/api/v1";
+const defaultApiUrl =
+  process.env.NODE_ENV === "development"
+    ? "/api/v1"
+    : "https://bet-anality.onrender.com/api/v1";
+
+export const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? defaultApiUrl;
 // Agenda may traverse three sports providers sequentially. Match analysis then
 // queries complementary data and up to four AI providers concurrently.
 export const requestTimeoutMs = 65_000;

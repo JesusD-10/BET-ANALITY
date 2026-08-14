@@ -171,7 +171,6 @@ def test_get_head_to_head(mock_get):
     assert mock_get.call_args.kwargs["params"] == {
         "h2h": "10-12",
         "last": "5",
-        "status": "FT-AET-PEN",
     }
 
 

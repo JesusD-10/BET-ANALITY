@@ -6,12 +6,15 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings, settings
 from app.main import app
 from app.schemas.matches import (
+    DisciplineSummary,
     MarketAnalysis,
     MatchAnalysisResponse,
     MatchSummary,
     RefereeInfo,
+    TeamDisciplineAverage,
 )
 from app.services.api_football import BookmakerQuote
+from app.services import matches as matches_service
 from app.services.matches import (
     _analysis_cache,
     _apply_verified_market_odds,
@@ -41,6 +44,16 @@ def _match() -> MatchSummary:
         data_quality=0.9,
         odds_available=False,
         status="PROGRAMADO",
+    )
+
+
+def _named_match(match_id: str, home_team: str, away_team: str) -> MatchSummary:
+    return _match().model_copy(
+        update={
+            "id": match_id,
+            "home_team": home_team,
+            "away_team": away_team,
+        }
     )
 
 
@@ -131,27 +144,63 @@ def test_multi_ai_timeout_uses_local_fallback(monkeypatch) -> None:
 
 
 def test_match_builders_include_high_probability_goal_and_cards() -> None:
+    markets = [
+        _advanced_market(
+            "DOUBLE_CHANCE_HOME_DRAW",
+            "Doble oportunidad",
+            "Equipo Local o empate",
+            0.82,
+        ),
+        _advanced_market(
+            "TOTAL_GOALS_OVER_1_5",
+            "Total de goles",
+            "Más de 1.5 goles",
+            0.80,
+        ),
+        _advanced_market(
+            "TOTAL_CORNERS_OVER_7_5",
+            "Total de córners",
+            "Más de 7.5 córners",
+            0.75,
+        ),
+    ]
     combinations = build_combinations(
         _match(),
         RefereeInfo(name="Árbitro", yellow_cards_avg=4.8),
+        markets,
     )
 
-    assert len(combinations) == 2
-    assert combinations[0].probability >= 0.70
-    assert [leg.market_key for leg in combinations[0].legs] == [
-        "TOTAL_GOALS_OVER_0_5",
-        "TOTAL_CARDS_OVER_2_5",
+    assert len(combinations) >= 4
+    assert all(item.probability >= 0.40 for item in combinations)
+    assert all(len(item.legs) >= 2 for item in combinations)
+    card_builders = [
+        item
+        for item in combinations
+        if any(leg.market_key == "TOTAL_CARDS_OVER_3_5" for leg in item.legs)
     ]
-    assert "independientes" in combinations[0].correlation_note
+    assert card_builders
+    assert any("4.8 amarillas" in factor for factor in card_builders[0].factors_for)
+    assert "independencia" in combinations[0].correlation_note
 
 
 def test_each_dream_has_minimum_probability_and_reference_odds() -> None:
-    dreams = build_dream_picks(_match(), None)
+    markets = [
+        _advanced_market("DOUBLE_CHANCE_HOME_DRAW", "Doble oportunidad", "Local o empate", 0.62),
+        _advanced_market("TOTAL_GOALS_OVER_2_5", "Total de goles", "Más de 2.5", 0.60),
+        _advanced_market("TOTAL_CORNERS_OVER_8_5", "Total de córners", "Más de 8.5", 0.60),
+        _advanced_market("TOTAL_CARDS_OVER_3_5", "Total de tarjetas", "Más de 3.5", 0.61),
+    ]
+    dreams = build_dream_picks(_match(), None, markets)
 
-    assert len(dreams) == 2
+    assert len(dreams) > 2
     assert all(dream.probability >= 0.30 for dream in dreams)
     assert all(dream.fair_odds >= 3.0 for dream in dreams)
     assert all(len(dream.legs) >= 2 for dream in dreams)
+    signatures = {
+        tuple(sorted(leg.market_key for leg in dream.legs))
+        for dream in dreams
+    }
+    assert len(signatures) == len(dreams)
 
 
 def test_dream_can_be_a_single_selection_when_the_whole_market_reaches_three() -> None:
@@ -178,9 +227,24 @@ def test_dream_can_be_a_single_selection_when_the_whole_market_reaches_three() -
 
 
 def test_dream_threshold_applies_to_complete_combination_not_each_leg() -> None:
+    markets = [
+        _advanced_market(
+            "DOUBLE_CHANCE_HOME_DRAW",
+            "Doble oportunidad",
+            "Equipo Local o empate",
+            0.62,
+        ),
+        _advanced_market(
+            "TOTAL_GOALS_OVER_2_5",
+            "Total de goles",
+            "Más de 2.5 goles",
+            0.60,
+        ),
+    ]
     dreams = build_dream_picks(
         _match(),
-        RefereeInfo(name="Árbitro", yellow_cards_avg=4.8),
+        None,
+        markets,
     )
 
     combined = next(item for item in dreams if item.kind == "dream-builder")
@@ -210,14 +274,14 @@ def test_advanced_markets_form_one_adjusted_builder_from_distinct_families() -> 
             "TOTAL_CORNERS_OVER_8_5",
             "Total de córners",
             "Más de 8.5 córners",
-            0.62,
+            0.78,
             data_quality=0.91,
         ),
         _advanced_market(
             "PLAYER_SHOTS_ON_TARGET_OVER_0_5",
             "Remates al arco de jugador",
             "Delantero: más de 0.5 remates al arco",
-            0.58,
+            0.72,
             data_quality=0.87,
         ),
     ]
@@ -232,7 +296,7 @@ def test_advanced_markets_form_one_adjusted_builder_from_distinct_families() -> 
         market_family(builder.legs[0].market_key),
         market_family(builder.legs[1].market_key),
     } == {"corners", "player_shots_on_target"}
-    assert builder.probability == round(0.62 * 0.58 * 0.90, 4)
+    assert builder.probability == round(0.78 * 0.72 * 0.90, 4)
     assert builder.fair_odds == round(1 / builder.probability, 2)
     assert builder.best_odds is None
     assert builder.expected_value is None
@@ -260,7 +324,7 @@ def test_advanced_builder_rejects_low_probability_or_same_family_legs() -> None:
     )
 
 
-def test_eligible_advanced_builder_has_priority_in_dreams_and_keeps_limit() -> None:
+def test_eligible_advanced_builder_is_grounded_and_unpriced() -> None:
     markets = [
         _advanced_market("TOTAL_CORNERS_OVER_8_5", "Córners", "Más de 8.5", 0.62),
         _advanced_market(
@@ -277,8 +341,8 @@ def test_eligible_advanced_builder_has_priority_in_dreams_and_keeps_limit() -> N
         markets,
     )
 
-    assert len(dreams) == 2
-    assert dreams[0].kind == "advanced-builder"
+    assert len(dreams) == 1
+    assert dreams[0].kind == "dream-builder"
     assert dreams[0].probability >= 0.30
     assert dreams[0].fair_odds >= 3.0
     assert dreams[0].best_odds is None
@@ -302,8 +366,15 @@ def test_advanced_dream_requires_probability_and_fair_odds_thresholds() -> None:
 
 def test_enrichment_passes_gated_markets_to_advanced_builders() -> None:
     markets = [
-        _advanced_market("TOTAL_CARDS_OVER_3_5", "Tarjetas", "Más de 3.5", 0.62),
-        _advanced_market("TEAM_SHOTS_HOME_OVER_9_5", "Remates", "Más de 9.5", 0.58),
+        _advanced_market("TOTAL_CARDS_OVER_3_5", "Tarjetas", "Más de 3.5", 0.78),
+        _advanced_market("TEAM_SHOTS_HOME_OVER_9_5", "Remates", "Más de 9.5", 0.72),
+        _advanced_market("TOTAL_CORNERS_OVER_8_5", "Córners", "Más de 8.5", 0.62),
+        _advanced_market(
+            "PLAYER_SHOTS_ON_TARGET_OVER_0_5",
+            "Remates al arco",
+            "Delantero: más de 0.5",
+            0.58,
+        ),
     ]
     analysis = MatchAnalysisResponse(
         match=_match(),
@@ -316,7 +387,275 @@ def test_enrichment_passes_gated_markets_to_advanced_builders() -> None:
     enriched = enrich_analysis_with_opportunities(analysis)
 
     assert any(item.kind == "advanced-builder" for item in enriched.combinations)
-    assert any(item.kind == "advanced-builder" for item in enriched.dream_picks)
+    assert any(item.kind == "dream-builder" for item in enriched.dream_picks)
+
+
+def test_dreams_are_interpreted_from_each_match_markets_instead_of_reusing_a_template() -> None:
+    first_match = _named_match("halcones-leones", "Halcones", "Leones")
+    first_markets = [
+        _advanced_market(
+            "DOUBLE_CHANCE_HOME_DRAW",
+            "Doble oportunidad",
+            "Halcones o empate",
+            0.56,
+        ),
+        _advanced_market(
+            "TOTAL_GOALS_OVER_2_5",
+            "Total de goles",
+            "Más de 2.5 goles",
+            0.68,
+        ),
+    ]
+    second_match = _named_match("tigres-condores", "Tigres", "Cóndores")
+    second_markets = [
+        _advanced_market(
+            "DRAW_NO_BET_AWAY",
+            "Empate no acción",
+            "Cóndores",
+            0.57,
+        ),
+        _advanced_market(
+            "BOTH_TEAMS_TO_SCORE",
+            "Ambos equipos anotan",
+            "No",
+            0.67,
+        ),
+    ]
+
+    first_dream = build_dream_picks(first_match, None, first_markets)[0]
+    second_dream = build_dream_picks(second_match, None, second_markets)[0]
+
+    assert first_dream.label == "Soñadora interpretada del partido"
+    assert second_dream.label == "Soñadora interpretada del partido"
+    assert [(leg.market_key, leg.selection) for leg in first_dream.legs] == [
+        ("DOUBLE_CHANCE_HOME_DRAW", "Halcones o empate"),
+        ("TOTAL_GOALS_OVER_2_5", "Más de 2.5 goles"),
+    ]
+    assert [(leg.market_key, leg.selection) for leg in second_dream.legs] == [
+        ("DRAW_NO_BET_AWAY", "Cóndores"),
+        ("BOTH_TEAMS_TO_SCORE", "No"),
+    ]
+    assert first_dream.selection != second_dream.selection
+    assert first_dream.id.startswith(f"{first_match.id}-")
+    assert second_dream.id.startswith(f"{second_match.id}-")
+
+
+def test_daily_safe_recommendations_use_the_best_market_of_each_match(monkeypatch) -> None:
+    first_match = _named_match("norte-sur", "Norte", "Sur")
+    second_match = _named_match("este-oeste", "Este", "Oeste")
+    analyses = {
+        first_match.id: MatchAnalysisResponse(
+            match=first_match,
+            model_version="per-match-test",
+            updated_at=datetime.now(timezone.utc),
+            notes=[],
+            markets=[
+                _advanced_market(
+                    "DOUBLE_CHANCE_HOME_DRAW",
+                    "Doble oportunidad",
+                    "Norte o empate",
+                    0.79,
+                    data_quality=0.92,
+                ),
+                _advanced_market(
+                    "TOTAL_GOALS_OVER_2_5",
+                    "Total de goles",
+                    "Más de 2.5 goles",
+                    0.61,
+                ),
+            ],
+        ),
+        second_match.id: MatchAnalysisResponse(
+            match=second_match,
+            model_version="per-match-test",
+            updated_at=datetime.now(timezone.utc),
+            notes=[],
+            markets=[
+                _advanced_market(
+                    "TOTAL_GOALS_UNDER_3_5",
+                    "Total de goles",
+                    "Menos de 3.5 goles",
+                    0.76,
+                    data_quality=0.91,
+                ),
+                _advanced_market(
+                    "WINNER_HOME",
+                    "Ganador del partido",
+                    "Este",
+                    0.58,
+                ),
+            ],
+        ),
+    }
+    monkeypatch.setattr(matches_service, "get_highlights", lambda: [first_match, second_match])
+    monkeypatch.setattr(
+        matches_service,
+        "_recommendation_analysis",
+        lambda match: analyses[match.id],
+    )
+
+    recommendations = matches_service.get_recommendations(limit=2)
+
+    assert [(item.match_id, item.selection) for item in recommendations] == [
+        (first_match.id, "Norte o empate"),
+        (second_match.id, "Menos de 3.5 goles"),
+    ]
+    assert [item.market for item in recommendations] == [
+        "Doble oportunidad",
+        "Total de goles",
+    ]
+
+
+def test_daily_safe_recommendations_never_repeat_a_match_to_fill_limit(monkeypatch) -> None:
+    first_match = _named_match("uno", "Uno", "Rival Uno")
+    second_match = _named_match("dos", "Dos", "Rival Dos")
+    analyses = {}
+    for match in (first_match, second_match):
+        analyses[match.id] = MatchAnalysisResponse(
+            match=match,
+            model_version="per-match-test",
+            updated_at=datetime.now(timezone.utc),
+            notes=[],
+            markets=[
+                _advanced_market(
+                    "TOTAL_GOALS_OVER_1_5",
+                    "Total de goles",
+                    "Más de 1.5 goles",
+                    0.78,
+                ),
+                _advanced_market(
+                    "TOTAL_GOALS_UNDER_3_5",
+                    "Total de goles",
+                    "Menos de 3.5 goles",
+                    0.72,
+                ),
+            ],
+        )
+    monkeypatch.setattr(matches_service, "get_highlights", lambda: [first_match, second_match])
+    monkeypatch.setattr(
+        matches_service,
+        "_recommendation_analysis",
+        lambda match: analyses[match.id],
+    )
+
+    recommendations = matches_service.get_recommendations(limit=20)
+
+    assert len(recommendations) == 2
+    assert len({item.match_id for item in recommendations}) == 2
+
+
+def test_daily_dreams_keep_the_market_interpretation_of_each_match(monkeypatch) -> None:
+    first_match = _named_match("azules-rojos", "Azules", "Rojos")
+    second_match = _named_match("verdes-dorados", "Verdes", "Dorados")
+    first_analysis = enrich_analysis_with_opportunities(
+        MatchAnalysisResponse(
+            match=first_match,
+            model_version="per-match-test",
+            updated_at=datetime.now(timezone.utc),
+            notes=[],
+            markets=[
+                _advanced_market(
+                    "DOUBLE_CHANCE_HOME_DRAW",
+                    "Doble oportunidad",
+                    "Azules o empate",
+                    0.56,
+                ),
+                _advanced_market(
+                    "TOTAL_GOALS_OVER_2_5",
+                    "Total de goles",
+                    "Más de 2.5 goles",
+                    0.68,
+                ),
+            ],
+        )
+    )
+    second_analysis = enrich_analysis_with_opportunities(
+        MatchAnalysisResponse(
+            match=second_match,
+            model_version="per-match-test",
+            updated_at=datetime.now(timezone.utc),
+            notes=[],
+            markets=[
+                _advanced_market(
+                    "DRAW_NO_BET_AWAY",
+                    "Empate no acción",
+                    "Dorados",
+                    0.57,
+                ),
+                _advanced_market(
+                    "BOTH_TEAMS_TO_SCORE",
+                    "Ambos equipos anotan",
+                    "No",
+                    0.67,
+                ),
+            ],
+        )
+    )
+    analyses = {
+        first_match.id: first_analysis,
+        second_match.id: second_analysis,
+    }
+    monkeypatch.setattr(matches_service, "get_highlights", lambda: [first_match, second_match])
+    monkeypatch.setattr(
+        matches_service,
+        "_recommendation_analysis",
+        lambda match: analyses[match.id],
+    )
+
+    recommendations = matches_service.get_dream_recommendations(limit=2)
+
+    assert [item.match_id for item in recommendations] == [first_match.id, second_match.id]
+    assert [[leg.market_key for leg in item.legs] for item in recommendations] == [
+        ["DOUBLE_CHANCE_HOME_DRAW", "TOTAL_GOALS_OVER_2_5"],
+        ["DRAW_NO_BET_AWAY", "BOTH_TEAMS_TO_SCORE"],
+    ]
+    assert recommendations[0].selection == (
+        "Doble oportunidad: Azules o empate + Total de goles: Más de 2.5 goles"
+    )
+    assert recommendations[1].selection == (
+        "Empate no acción: Dorados + Ambos equipos anotan: No"
+    )
+
+
+def test_daily_dreams_do_not_fill_limit_with_repeated_leg_structure(monkeypatch) -> None:
+    first_match = _named_match("primero", "Primero", "Rival A")
+    second_match = _named_match("segundo", "Segundo", "Rival B")
+    analyses = {}
+    for match in (first_match, second_match):
+        analyses[match.id] = enrich_analysis_with_opportunities(
+            MatchAnalysisResponse(
+                match=match,
+                model_version="per-match-test",
+                updated_at=datetime.now(timezone.utc),
+                notes=[],
+                markets=[
+                    _advanced_market(
+                        "DOUBLE_CHANCE_HOME_DRAW",
+                        "Doble oportunidad",
+                        f"{match.home_team} o empate",
+                        0.56,
+                    ),
+                    _advanced_market(
+                        "TOTAL_GOALS_OVER_2_5",
+                        "Total de goles",
+                        "Más de 2.5 goles",
+                        0.68,
+                    ),
+                ],
+            )
+        )
+    monkeypatch.setattr(matches_service, "get_highlights", lambda: [first_match, second_match])
+    monkeypatch.setattr(
+        matches_service,
+        "_recommendation_analysis",
+        lambda match: analyses[match.id],
+    )
+
+    recommendations = matches_service.get_dream_recommendations(limit=8)
+
+    assert len(recommendations) == 1
+    signatures = [tuple(sorted(leg.market_key for leg in item.legs)) for item in recommendations]
+    assert len(signatures) == len(set(signatures))
 
 
 def test_verified_odds_overlay_sets_bookmaker_ev_without_pricing_builders() -> None:
@@ -375,9 +714,47 @@ def test_verified_odds_overlay_sets_bookmaker_ev_without_pricing_builders() -> N
     assert all(item.expected_value is None for item in enriched.combinations)
 
 
+def test_verified_odds_overlay_rejects_selection_opposite_to_market_key() -> None:
+    market = MarketAnalysis(
+        market_key="TOTAL_GOALS_OVER_2_5",
+        label="Goles",
+        selection="Menos de 2.5 goles",
+        probability=0.58,
+        fair_odds=1.72,
+        confidence="Media",
+        data_quality=0.8,
+        factors_for=["Forma reciente"],
+        risks=["Varianza"],
+    )
+    analysis = MatchAnalysisResponse(
+        match=_match(),
+        model_version="test-model",
+        updated_at=datetime.now(timezone.utc),
+        markets=[market],
+        notes=[],
+    )
+    quote = BookmakerQuote(
+        market_key="TOTAL_GOALS_OVER_2_5",
+        odds=2.05,
+        bookmaker="Casa real",
+    )
+
+    enriched = _apply_verified_market_odds(
+        analysis,
+        {"TOTAL_GOALS_OVER_2_5": quote},
+    )
+
+    assert enriched.markets[0].best_odds is None
+    assert enriched.markets[0].expected_value is None
+
+
 def test_cards_are_omitted_from_generated_builders_without_referee_metrics() -> None:
-    combinations = build_combinations(_match(), None)
-    dreams = build_dream_picks(_match(), None)
+    markets = [
+        _advanced_market("DOUBLE_CHANCE_HOME_DRAW", "Doble oportunidad", "Local o empate", 0.76),
+        _advanced_market("TOTAL_GOALS_OVER_1_5", "Total de goles", "Más de 1.5", 0.74),
+    ]
+    combinations = build_combinations(_match(), None, markets)
+    dreams = build_dream_picks(_match(), None, markets)
 
     all_keys = {
         leg.market_key
@@ -385,6 +762,81 @@ def test_cards_are_omitted_from_generated_builders_without_referee_metrics() -> 
         for leg in item.legs
     }
     assert not any("CARD" in key for key in all_keys)
+
+
+def test_team_card_averages_create_a_grounded_total_card_leg() -> None:
+    discipline = DisciplineSummary(
+        home=TeamDisciplineAverage(
+            team_name="Equipo Local",
+            sample_size=6,
+            yellow_cards_avg=2.4,
+        ),
+        away=TeamDisciplineAverage(
+            team_name="Equipo Visitante",
+            sample_size=5,
+            yellow_cards_avg=2.1,
+        ),
+        note="Muestras recientes verificadas",
+    )
+    markets = [
+        _advanced_market("DOUBLE_CHANCE_HOME_DRAW", "Doble oportunidad", "Local o empate", 0.78),
+        _advanced_market("TOTAL_GOALS_OVER_1_5", "Total de goles", "Más de 1.5", 0.76),
+    ]
+
+    combinations = build_combinations(
+        _match(),
+        RefereeInfo(name="Árbitro", yellow_cards_avg=3.1),
+        markets,
+        discipline,
+    )
+
+    card_builders = [
+        item
+        for item in combinations
+        if any(leg.market_key == "TOTAL_CARDS_OVER_2_5" for leg in item.legs)
+    ]
+    assert card_builders
+    card_factors = {
+        factor
+        for item in card_builders
+        for factor in item.factors_for
+    }
+    assert any("2.4 amarillas" in factor for factor in card_factors)
+    assert any("2.1 amarillas" in factor for factor in card_factors)
+    assert not any("3.1 amarillas" in factor for factor in card_factors)
+
+
+def test_explicit_markets_never_trigger_generic_or_hash_fallbacks() -> None:
+    only_market = _advanced_market(
+        "TOTAL_GOALS_OVER_1_5",
+        "Total de goles",
+        "Más de 1.5 goles",
+        0.78,
+    )
+
+    assert build_combinations(_match(), None, [only_market]) == []
+    assert build_dream_picks(_match(), None, [only_market]) == []
+
+
+def test_explicit_card_market_takes_precedence_over_derived_average() -> None:
+    markets = [
+        _advanced_market("DOUBLE_CHANCE_HOME_DRAW", "Doble oportunidad", "Local o empate", 0.82),
+        _advanced_market("TOTAL_CARDS_OVER_4_5", "Total de tarjetas", "Más de 4.5", 0.72),
+    ]
+
+    combinations = build_combinations(
+        _match(),
+        RefereeInfo(name="Árbitro", yellow_cards_avg=4.8),
+        markets,
+    )
+
+    card_keys = {
+        leg.market_key
+        for item in combinations
+        for leg in item.legs
+        if "CARD" in leg.market_key
+    }
+    assert card_keys == {"TOTAL_CARDS_OVER_4_5"}
 
 
 def test_analysis_contract_exposes_combinations_and_match_dreams(monkeypatch) -> None:
@@ -416,8 +868,11 @@ def test_daily_dreams_are_diversified_and_respect_limit(monkeypatch) -> None:
 
     assert response.status_code == 200
     items = response.json()["recommendations"]
-    assert len(items) == 3
-    assert len({item["match_id"] for item in items}) == 3
+    # When only two distinct evidence structures qualify, the endpoint is
+    # intentionally shorter than the requested limit instead of repeating one.
+    assert 1 <= len(items) <= 3
+    signatures = [tuple(sorted(leg["market_key"] for leg in item["legs"])) for item in items]
+    assert len(signatures) == len(set(signatures))
     assert all(item["probability"] >= 0.30 for item in items)
     assert all(item["fair_odds"] >= 3.0 for item in items)
 

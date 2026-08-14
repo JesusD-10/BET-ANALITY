@@ -279,12 +279,12 @@ class APIFootballProvider:
         still useful and is returned unchanged.
         """
         bounded_limit = max(1, min(limit, 10))
-        data = self._request(
+        raw_items = self._request_completed_fixtures(
             "fixtures",
             params={"team": team_id, "last": str(bounded_limit), "status": "FT-AET-PEN"},
         )
         raw_items = sorted(
-            [item for item in data.get("response", []) if self._is_completed_fixture(item)],
+            raw_items,
             key=lambda item: str((item.get("fixture") or {}).get("date") or ""),
             reverse=True,
         )[:bounded_limit]
@@ -311,6 +311,47 @@ class APIFootballProvider:
         # Compatibility for detailed/cached completed-fixture payloads that
         # predate the status field in this adapter's tests or local cache.
         return bool(item.get("statistics") or item.get("players"))
+
+    def _request_completed_fixtures(
+        self,
+        endpoint: str,
+        *,
+        params: dict[str, str],
+    ) -> list[dict]:
+        """Request played fixtures and retry once without the status filter.
+
+        Some API-Football plans/proxies have returned an empty response when
+        ``last`` and the multi-value ``status`` filter are combined, even
+        though the same request without ``status`` contains completed rows.
+        We still filter locally, so the compatibility retry cannot leak
+        scheduled fixtures into H2H or recent-form history.
+        """
+
+        def completed(payload: dict) -> list[dict]:
+            response = payload.get("response")
+            if not isinstance(response, list):
+                raise APIFootballAPIError(
+                    "API-Football devolvió un historial con formato inesperado."
+                )
+            return [
+                item
+                for item in response
+                if isinstance(item, dict) and self._is_completed_fixture(item)
+            ]
+
+        try:
+            requested = completed(self._request(endpoint, params=params))
+        except APIFootballAPIError:
+            if "status" not in params:
+                raise
+            requested = []
+        if requested or "status" not in params:
+            return requested
+
+        compatibility_params = {
+            key: value for key, value in params.items() if key != "status"
+        }
+        return completed(self._request(endpoint, params=compatibility_params))
 
     def enrich_fixture_histories(
         self,
@@ -493,21 +534,31 @@ class APIFootballProvider:
         return normalized
 
     def get_head_to_head(self, team1_id: str, team2_id: str, limit: int = 5) -> list[H2HMatchItem]:
-        h2h_param = f"{team1_id}-{team2_id}"
+        """Return played meetings using API-Football's canonical H2H query.
+
+        ``h2h`` is the only required parameter documented by API-Football and
+        ``last`` is enough to request the recent meetings.  The additional
+        multi-status filter introduced later caused valid H2H requests to
+        return an empty result for some accounts/proxies, while the original
+        ``h2h + last`` request still returned the fixtures.  Fetch the canonical
+        payload once and enforce completed statuses locally so scheduled rows
+        can never be displayed as history.
+        """
+
+        first_id = str(team1_id or "").removeprefix("api-football-").strip()
+        second_id = str(team2_id or "").removeprefix("api-football-").strip()
+        if not first_id or not second_id or first_id == second_id:
+            return []
+
+        h2h_param = f"{first_id}-{second_id}"
         bounded_limit = max(1, min(limit, 10))
-        data = self._request(
+        completed = self._request_completed_fixtures(
             "fixtures/headtohead",
             params={
                 "h2h": h2h_param,
                 "last": str(bounded_limit),
-                "status": "FT-AET-PEN",
             },
         )
-        completed = [
-            item
-            for item in data.get("response", [])
-            if self._is_completed_fixture(item)
-        ]
         return self.normalize_history(completed, bounded_limit)
 
     @staticmethod

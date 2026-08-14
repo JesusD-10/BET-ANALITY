@@ -10,6 +10,7 @@ from app.services.ai_analyzer import (
     _consensus_market_payloads,
     _format_recent_history,
     _generate_local_fallback_analysis,
+    _goal_profile,
     analyze_match_with_ai,
 )
 from app.services.ai_gateway import ai_gateway
@@ -465,3 +466,86 @@ def test_normalized_recent_matches_are_accepted_without_enabling_advanced_market
     families = _available_market_families(None, [recent], [])
 
     assert families == {"result", "goals"}
+
+
+def test_local_fallback_uses_match_scores_instead_of_team_name_hashes():
+    match = MatchSummary(
+        id="same-fixture",
+        competition="Liga",
+        kickoff_at=datetime.now(timezone.utc),
+        home_team="Local",
+        away_team="Visitante",
+        home_team_id="1",
+        away_team_id="2",
+        data_quality=0.9,
+        status="PROGRAMADO",
+    )
+    high_scoring = [
+        H2HMatchItem(
+            date=f"2026-08-0{index}",
+            competition="Liga",
+            home_team="Local",
+            away_team=f"Rival {index}",
+            score="3 - 2",
+            winner="Local",
+        )
+        for index in range(1, 6)
+    ]
+    low_scoring = [
+        H2HMatchItem(
+            date=f"2026-07-0{index}",
+            competition="Liga",
+            home_team="Local",
+            away_team=f"Rival {index}",
+            score="1 - 0",
+            winner="Local",
+        )
+        for index in range(1, 6)
+    ]
+
+    high = _generate_local_fallback_analysis(
+        match,
+        None,
+        [],
+        None,
+        [],
+        high_scoring,
+        [],
+    )
+    low = _generate_local_fallback_analysis(
+        match,
+        None,
+        [],
+        None,
+        [],
+        low_scoring,
+        [],
+    )
+    high_markets = {market.market_key: market for market in high.markets}
+    low_markets = {market.market_key: market for market in low.markets}
+
+    assert high_markets["TOTAL_GOALS_OVER_1_5"].probability > low_markets["TOTAL_GOALS_OVER_1_5"].probability
+    assert high_markets["TOTAL_GOALS_UNDER_3_5"].probability < low_markets["TOTAL_GOALS_UNDER_3_5"].probability
+
+
+def test_goal_profile_deduplicates_same_fixture_with_timestamp_and_date():
+    raw = {
+        "fixture": {"date": "2026-08-10T20:00:00+00:00"},
+        "teams": {
+            "home": {"id": 1, "name": "Local"},
+            "away": {"id": 2, "name": "Visitante"},
+        },
+        "goals": {"home": 2, "away": 1},
+    }
+    normalized = H2HMatchItem(
+        date="2026-08-10",
+        competition="Liga",
+        home_team="Local",
+        away_team="Visitante",
+        score="2 - 1",
+        winner="Local",
+    )
+
+    samples, *_ = _goal_profile([raw], [normalized])
+
+    assert samples == 1

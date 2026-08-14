@@ -351,6 +351,8 @@ def analyze_match_with_ai(
             injuries=injuries_list,
             lineups=lineups,
             h2h_matches=h2h_list,
+            home_history=home_history,
+            away_history=away_history,
         )
     )
 
@@ -496,7 +498,15 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
         )
 
     if not markets:
-        return _generate_local_fallback_analysis(match, referee_info, injuries, lineups, h2h_matches)
+        return _generate_local_fallback_analysis(
+            match,
+            referee_info,
+            injuries,
+            lineups,
+            h2h_matches,
+            home_history,
+            away_history,
+        )
 
     if len(completions) > 1:
         provider_label = "+".join(completion.provider for completion in completions)
@@ -535,152 +545,294 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
     )
 
 
+def _numeric_goal(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and float(value).is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            return None
+        return int(parsed) if parsed.is_integer() else None
+    return None
+
+
+def _history_result(item: dict | H2HMatchItem) -> tuple[str, str, str | None, str | None, int, int] | None:
+    """Normalize just the fields used by the local probability model."""
+
+    if hasattr(item, "model_dump"):
+        item = item.model_dump()
+    if not isinstance(item, dict):
+        return None
+
+    teams = item.get("teams") or {}
+    home = teams.get("home") or item.get("homeTeam") or {}
+    away = teams.get("away") or item.get("awayTeam") or {}
+    home_name = str(home.get("name") or item.get("home_team") or "").strip()
+    away_name = str(away.get("name") or item.get("away_team") or "").strip()
+    home_id = str(home["id"]) if isinstance(home, dict) and home.get("id") is not None else None
+    away_id = str(away["id"]) if isinstance(away, dict) and away.get("id") is not None else None
+
+    goals = item.get("goals") or ((item.get("score") or {}).get("fullTime") if isinstance(item.get("score"), dict) else None) or {}
+    home_goals = _numeric_goal(goals.get("home")) if isinstance(goals, dict) else None
+    away_goals = _numeric_goal(goals.get("away")) if isinstance(goals, dict) else None
+    if home_goals is None or away_goals is None:
+        raw_score = item.get("score")
+        if isinstance(raw_score, str):
+            score_parts = raw_score.replace("–", "-").split("-")
+            if len(score_parts) == 2:
+                home_goals = _numeric_goal(score_parts[0])
+                away_goals = _numeric_goal(score_parts[1])
+
+    if not home_name or not away_name or home_goals is None or away_goals is None:
+        return None
+    return home_name, away_name, home_id, away_id, home_goals, away_goals
+
+
+def _team_form_profile(
+    team_name: str,
+    team_id: str | None,
+    history: list[dict | H2HMatchItem],
+    compact_form: str | None,
+) -> tuple[float, int, float, float]:
+    """Return points rate, sample size, goals for and goals against."""
+
+    points = 0
+    games = 0
+    goals_for = 0
+    goals_against = 0
+    target_name = _selection_signature(team_name)
+    target_id = str(team_id) if team_id is not None else None
+    for raw_item in history[:10]:
+        result = _history_result(raw_item)
+        if result is None:
+            continue
+        home_name, away_name, home_id, away_id, home_goals, away_goals = result
+        is_home = bool(
+            (target_id is not None and home_id == target_id)
+            or _selection_signature(home_name) == target_name
+        )
+        is_away = bool(
+            (target_id is not None and away_id == target_id)
+            or _selection_signature(away_name) == target_name
+        )
+        if is_home == is_away:
+            continue
+        scored, conceded = (home_goals, away_goals) if is_home else (away_goals, home_goals)
+        games += 1
+        goals_for += scored
+        goals_against += conceded
+        points += 3 if scored > conceded else 1 if scored == conceded else 0
+
+    if games:
+        return points / (games * 3), games, goals_for / games, goals_against / games
+
+    form_tokens = [token.strip().upper() for token in (compact_form or "").replace(",", "-").split("-")]
+    form_tokens = [token for token in form_tokens if token in {"W", "D", "L", "G", "E", "P"}]
+    if form_tokens:
+        form_points = sum(3 if token in {"W", "G"} else 1 if token in {"D", "E"} else 0 for token in form_tokens)
+        return form_points / (len(form_tokens) * 3), len(form_tokens), 0.0, 0.0
+    return 0.5, 0, 0.0, 0.0
+
+
+def _goal_profile(
+    *histories: list[dict | H2HMatchItem],
+) -> tuple[int, float, float, float, float, float]:
+    seen: set[tuple[str, str, str, int, int]] = set()
+    totals: list[int] = []
+    btts = 0
+    for history in histories:
+        for raw_item in history[:10]:
+            result = _history_result(raw_item)
+            if result is None:
+                continue
+            home_name, away_name, _, _, home_goals, away_goals = result
+            serialized = raw_item.model_dump() if hasattr(raw_item, "model_dump") else raw_item
+            fixture = serialized.get("fixture") or {} if isinstance(serialized, dict) else {}
+            played_at = (
+                fixture.get("date")
+                or serialized.get("utcDate")
+                or serialized.get("starting_at")
+                or serialized.get("date")
+                or ""
+            )
+            # API-Football histories use a full timestamp while normalized H2H
+            # rows expose YYYY-MM-DD. Compare the calendar date so the same
+            # fixture is not counted twice merely because it came through two
+            # evidence paths.
+            signature = (str(played_at)[:10], home_name, away_name, home_goals, away_goals)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            totals.append(home_goals + away_goals)
+            btts += int(home_goals > 0 and away_goals > 0)
+    sample_size = len(totals)
+    if not sample_size:
+        return 0, 2.45, 0.74, 0.51, 0.70, 0.54
+    # Four virtual league-average matches prevent tiny samples from producing
+    # extreme probabilities while letting real recent scores move the model.
+    return (
+        sample_size,
+        sum(totals) / sample_size,
+        (sum(total >= 2 for total in totals) + 3.0) / (sample_size + 4),
+        (sum(total >= 3 for total in totals) + 2.04) / (sample_size + 4),
+        (sum(total <= 3 for total in totals) + 2.8) / (sample_size + 4),
+        (btts + 2.16) / (sample_size + 4),
+    )
+
+
+def _clamp_probability(value: float, lower: float = 0.35, upper: float = 0.88) -> float:
+    return round(max(lower, min(upper, value)), 3)
+
+
+def _local_market(
+    *,
+    market_key: str,
+    label: str,
+    selection: str,
+    probability: float,
+    data_quality: float,
+    factors_for: list[str],
+    risks: list[str],
+) -> MarketAnalysis:
+    probability = _clamp_probability(probability)
+    return MarketAnalysis(
+        market_key=market_key,
+        label=label,
+        selection=selection,
+        probability=probability,
+        fair_odds=round(1.0 / probability, 2),
+        best_odds=None,
+        expected_value=None,
+        confidence="Alta" if probability >= 0.75 and data_quality >= 0.7 else "Media-alta" if probability >= 0.64 else "Media",
+        data_quality=data_quality,
+        factors_for=factors_for,
+        risks=risks,
+    )
+
+
 def _generate_local_fallback_analysis(
     match: MatchSummary,
     referee_info: RefereeInfo | None,
     injuries: list[InjuryItem],
     lineups: LineupsSummary | None,
     h2h_matches: list[H2HMatchItem],
+    home_history: list[dict | H2HMatchItem] | None = None,
+    away_history: list[dict | H2HMatchItem] | None = None,
 ) -> MatchAnalysisResponse:
-    """Generador estadístico dinámico basado en nombres de equipos y forma reciente para evitar datos duplicados."""
-    team_hash = sum(ord(c) for c in (match.home_team + match.away_team))
-    
+    """Build match-specific markets from form and scores, with an honest prior."""
+
+    home_history = home_history or []
+    away_history = away_history or []
     referee_obj = referee_info or RefereeInfo(
         name=match.referee or "Sin designar",
         tendency="Sin métricas arbitrales verificadas",
     )
+    home_rate, home_games, home_gf, home_ga = _team_form_profile(
+        match.home_team,
+        match.home_team_id,
+        home_history,
+        match.home_form,
+    )
+    away_rate, away_games, away_gf, away_ga = _team_form_profile(
+        match.away_team,
+        match.away_team_id,
+        away_history,
+        match.away_form,
+    )
+    goal_samples, avg_total, over_1_5, over_2_5, under_3_5, btts_yes = _goal_profile(
+        home_history,
+        away_history,
+        h2h_matches,
+    )
 
-    # Selección dinámica de mercados según perfil de los equipos
-    mod = team_hash % 3
-    if mod == 0:
-        p1, p2, p3 = 0.68, 0.76, 0.62
-        markets = [
-            MarketAnalysis(
-                market_key="WINNER_HOME",
-                label="Ganador del partido",
-                selection=f"Victoria de {match.home_team}",
-                probability=p1,
-                fair_odds=round(1.0 / p1, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Media-alta",
-                data_quality=match.data_quality,
-                factors_for=[f"Fuerte rendimiento de {match.home_team} en casa", "Ventaja táctica en mediocampo"],
-                risks=["Visitantes efectivos en contraataque"],
-            ),
-            MarketAnalysis(
-                market_key="TOTAL_GOALS_OVER_2_5",
-                label="Total de goles",
-                selection="Más de 2.5 goles",
-                probability=p2,
-                fair_odds=round(1.0 / p2, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Alta",
-                data_quality=match.data_quality,
-                factors_for=["Mercado general derivado de los marcadores disponibles"],
-                risks=["Un planteamiento conservador puede reducir el volumen de ocasiones"],
-            ),
-            MarketAnalysis(
-                market_key="BOTH_TEAMS_TO_SCORE",
-                label="Ambos equipos anotan",
-                selection="Sí",
-                probability=p3,
-                fair_odds=round(1.0 / p3, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Media",
-                data_quality=match.data_quality,
-                factors_for=["Mercado de goles compatible con los datos básicos disponibles"],
-                risks=["Una portería a cero invalida la selección"],
-            ),
-        ]
-    elif mod == 1:
-        p1, p2, p3 = 0.72, 0.65, 0.58
-        markets = [
-            MarketAnalysis(
-                market_key="DOUBLE_CHANCE_HOME_DRAW",
-                label="Doble oportunidad",
-                selection=f"{match.home_team} o Empate (1X)",
-                probability=p1,
-                fair_odds=round(1.0 / p1, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Alta",
-                data_quality=match.data_quality,
-                factors_for=[f"La doble oportunidad reduce la exposición a un empate de {match.home_team}"],
-                risks=["Presión constante del equipo visitante"],
-            ),
-            MarketAnalysis(
-                market_key="BOTH_TEAMS_TO_SCORE",
-                label="Ambos equipos anotan",
-                selection="Sí",
-                probability=p2,
-                fair_odds=round(1.0 / p2, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Media-alta",
-                data_quality=match.data_quality,
-                factors_for=["Mercado general de anotación disponible con datos de marcador"],
-                risks=["Defensa cerrada en partidos eliminatorios"],
-            ),
-            MarketAnalysis(
-                market_key="TOTAL_GOALS_UNDER_3_5",
-                label="Total de goles",
-                selection="Menos de 3.5 goles",
-                probability=p3,
-                fair_odds=round(1.0 / p3, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Media",
-                data_quality=match.data_quality,
-                factors_for=["Umbral moderado calculado con información de marcadores"],
-                risks=["Un intercambio ofensivo temprano puede superar la línea"],
-            ),
-        ]
-    else:
-        p1, p2, p3 = 0.80, 0.64, 0.69
-        markets = [
-            MarketAnalysis(
-                market_key="TOTAL_GOALS_OVER_1_5",
-                label="Total de goles",
-                selection="Más de 1.5 goles",
-                probability=p1,
-                fair_odds=round(1.0 / p1, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Alta",
-                data_quality=match.data_quality,
-                factors_for=["Línea de goles compatible con el conjunto de datos básico"],
-                risks=["Clima adverso o rotación en delantera"],
-            ),
-            MarketAnalysis(
-                market_key="HANDICAP_HOME_MINUS_0_5",
-                label="Hándicap asiático",
-                selection=f"{match.home_team} (-0.5)",
-                probability=p2,
-                fair_odds=round(1.0 / p2, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Media",
-                data_quality=match.data_quality,
-                factors_for=[f"Escenario ofensivo del modelo basal para {match.home_team}"],
-                risks=["Reacción en bloque del equipo rival"],
-            ),
-            MarketAnalysis(
-                market_key="DOUBLE_CHANCE_AWAY_DRAW",
-                label="Doble oportunidad",
-                selection=f"{match.away_team} o empate (X2)",
-                probability=p3,
-                fair_odds=round(1.0 / p3, 2),
-                best_odds=None,
-                expected_value=None,
-                confidence="Media-alta",
-                data_quality=match.data_quality,
-                factors_for=["La doble oportunidad cubre empate y triunfo visitante"],
-                risks=[f"Una victoria de {match.home_team} invalida la selección"],
-            ),
-        ]
+    evidence_samples = min(10, home_games + away_games + min(goal_samples, 4))
+    data_quality = round(
+        min(match.data_quality, 0.52 + evidence_samples * 0.035),
+        2,
+    )
+    strength_gap = home_rate - away_rate
+    scoring_gap = ((home_gf + away_ga) - (away_gf + home_ga)) / 4
+    prefer_away = strength_gap < -0.08
+    protected_probability = (
+        0.65 + (-strength_gap * 0.20) - scoring_gap * 0.025
+        if prefer_away
+        else 0.68 + (strength_gap * 0.20) + scoring_gap * 0.025
+    )
+    protected_key = "DOUBLE_CHANCE_AWAY_DRAW" if prefer_away else "DOUBLE_CHANCE_HOME_DRAW"
+    protected_team = match.away_team if prefer_away else match.home_team
+    form_factor = (
+        f"Forma reciente: {match.home_team} {home_rate * 100:.0f}% y "
+        f"{match.away_team} {away_rate * 100:.0f}% de los puntos posibles"
+        if home_games or away_games
+        else "Sin forma reciente verificada; se aplica un prior conservador específico del cruce"
+    )
+    goal_factor = (
+        f"{avg_total:.2f} goles totales por partido en {goal_samples} marcadores recientes únicos"
+        if goal_samples
+        else "Sin marcadores recientes verificados; la estimación se contrae al promedio basal"
+    )
+
+    btts_selection = "Sí" if btts_yes >= 0.5 else "No"
+    btts_probability = btts_yes if btts_yes >= 0.5 else 1.0 - btts_yes
+    goals_2_5_selection = "Más de 2.5 goles" if over_2_5 >= 0.5 else "Menos de 2.5 goles"
+    goals_2_5_key = "TOTAL_GOALS_OVER_2_5" if over_2_5 >= 0.5 else "TOTAL_GOALS_UNDER_2_5"
+    goals_2_5_probability = over_2_5 if over_2_5 >= 0.5 else 1.0 - over_2_5
+
+    candidates = [
+        _local_market(
+            market_key=protected_key,
+            label="Doble oportunidad",
+            selection=f"{protected_team} o empate",
+            probability=protected_probability,
+            data_quality=data_quality,
+            factors_for=[form_factor, "La doble oportunidad cubre también el empate"],
+            risks=[f"Una derrota de {protected_team} invalida la selección"],
+        ),
+        _local_market(
+            market_key="TOTAL_GOALS_OVER_1_5",
+            label="Total de goles",
+            selection="Más de 1.5 goles",
+            probability=over_1_5,
+            data_quality=data_quality,
+            factors_for=[goal_factor],
+            risks=["Un partido cerrado o con baja eficacia puede quedar por debajo de dos goles"],
+        ),
+        _local_market(
+            market_key="TOTAL_GOALS_UNDER_3_5",
+            label="Total de goles",
+            selection="Menos de 3.5 goles",
+            probability=under_3_5,
+            data_quality=data_quality,
+            factors_for=[goal_factor],
+            risks=["Un gol temprano puede abrir el partido y elevar el marcador"],
+        ),
+        _local_market(
+            market_key="BOTH_TEAMS_TO_SCORE",
+            label="Ambos equipos anotan",
+            selection=btts_selection,
+            probability=btts_probability,
+            data_quality=data_quality,
+            factors_for=[goal_factor],
+            risks=["La selección depende de la eficacia de ambos ataques y defensas"],
+        ),
+        _local_market(
+            market_key=goals_2_5_key,
+            label="Total de goles",
+            selection=goals_2_5_selection,
+            probability=goals_2_5_probability,
+            data_quality=data_quality,
+            factors_for=[goal_factor],
+            risks=["La línea de 2.5 tiene mayor varianza que los umbrales protegidos"],
+        ),
+    ]
+    markets = sorted(
+        candidates,
+        key=lambda market: (market.probability * market.data_quality, market.probability),
+        reverse=True,
+    )
 
     return MatchAnalysisResponse(
         match=match,
@@ -690,7 +842,10 @@ def _generate_local_fallback_analysis(
         injuries=injuries,
         lineups=lineups,
         h2h_matches=h2h_matches,
-        tactical_summary=f"Choque entre {match.home_team} y {match.away_team}. El modelo analiza transiciones rápidas y solidez defensiva.",
+        tactical_summary=(
+            f"{match.home_team} vs {match.away_team}: la lectura local compara forma, "
+            f"producción de goles y {goal_samples} marcadores recientes únicos."
+        ),
         injuries_impact=f"Se identifican {len(injuries)} bajas en las plantillas.",
         referee_impact=(
             f"Árbitro {referee_obj.name}: registra {referee_obj.yellow_cards_avg} amarillas promedio."
@@ -699,8 +854,9 @@ def _generate_local_fallback_analysis(
         ),
         markets=markets,
         notes=[
-            "Análisis adaptativo dinámico basado en estadísticas de forma y H2H.",
+            f"Análisis adaptativo por partido con {evidence_samples} muestras de forma/goles disponibles.",
             "Cuota justa calculada inversamente a la probabilidad estimada.",
+            "best_odds y EV permanecen vacíos cuando no existe una cotización verificada.",
             "Córners, remates y mercados de jugador se omiten cuando la API no aporta estadísticas específicas.",
         ],
     )
