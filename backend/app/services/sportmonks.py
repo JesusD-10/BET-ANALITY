@@ -143,7 +143,15 @@ class SportmonksProvider:
                 # or kickoff data and must not invalidate the rest of the page.
                 if item.get("placeholder") is True:
                     continue
-                match = self._to_match_summary(item)
+                try:
+                    match = self._to_match_summary(item)
+                except SportmonksAPIError:
+                    logger.warning(
+                        "Sportmonks ignoró un fixture malformado en %s: %s",
+                        selected_date.isoformat(),
+                        item,
+                    )
+                    continue
                 if match.id not in seen_ids:
                     seen_ids.add(match.id)
                     fixtures.append(match)

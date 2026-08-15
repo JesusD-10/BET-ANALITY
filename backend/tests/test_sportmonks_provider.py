@@ -147,6 +147,36 @@ def _sportmonks_fixture(
     }
 
 
+def test_sportmonks_skips_malformed_fixtures_without_aborting_the_agenda(monkeypatch) -> None:
+    valid = _sportmonks_fixture(9001)
+    malformed = {
+        "id": 9002,
+        "league": {"name": "Liga 1"},
+        "state_id": 1,
+        "state": {"state": "NS"},
+        "participants": [
+            {
+                "id": 19,
+                "name": "Equipo raro",
+                "image_path": "https://img.test/raro.png",
+            }
+        ],
+    }
+
+    def fake_get(url: str, **kwargs):
+        return httpx.Response(
+            200,
+            json={"data": [valid, malformed], "pagination": {"has_more": False}},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    fixtures = SportmonksProvider("token", timeout=15).list_fixtures(date(2026, 8, 12))
+
+    assert [fixture.id for fixture in fixtures] == ["sportmonks-9001"]
+
+
 def test_sportmonks_uses_bearer_header_and_maps_fixture(monkeypatch) -> None:
     captured: dict = {}
 
