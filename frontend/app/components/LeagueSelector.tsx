@@ -35,7 +35,6 @@ export default function LeagueSelector({
               onClick={() => onSelectLeague?.(league)}
               title={`${league.name} - ${league.country}`}
             >
-              {/* Logo de la liga */}
               <div className="league-logo-container">
                 {league.logoUrl ? (
                   <img
@@ -43,7 +42,6 @@ export default function LeagueSelector({
                     alt={league.name}
                     className="league-logo"
                     onError={(e) => {
-                      // Fallback si la imagen no carga
                       const target = e.target as HTMLImageElement;
                       target.style.display = "none";
                     }}
@@ -55,7 +53,6 @@ export default function LeagueSelector({
                 )}
               </div>
 
-              {/* Información: nombre y país */}
               <div className="league-info">
                 <strong className="league-name">{league.name}</strong>
                 <div className="league-country-info">
@@ -65,7 +62,6 @@ export default function LeagueSelector({
                       alt={league.country}
                       className="country-flag"
                       onError={(e) => {
-                        // Fallback si la bandera no carga
                         const target = e.target as HTMLImageElement;
                         target.style.display = "none";
                       }}

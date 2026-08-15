@@ -401,52 +401,128 @@ a { color: inherit; text-decoration: none; }
   .player-leaderboards { grid-template-columns: 1fr; }
 }
 
-/* League selector: horizontal fila de ligas con scroll (tipo FlashScore) */
+/* League selector: fila horizontal compacta estilo Flashscore */
 .league-browser { margin-top: 28px; }
-.league-selector-wrapper { width: 100%; overflow-x: auto; scrollbar-color: #53605b transparent; scrollbar-width: thin; }
-.league-selector { display: flex; gap: 12px; padding: 0 0 12px; min-width: min-content; }
-.league-selector-card { 
-  flex: 0 0 min(200px, 24%);
+.league-selector-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-color: #53605b transparent;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+.league-selector {
   display: flex;
-  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  min-width: max-content;
+  padding: 0 0 12px;
+}
+.league-selector-card {
+  display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 16px 12px;
+  min-width: 150px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #171d1b;
+  border-radius: 12px;
+  background: rgba(17, 22, 21, 0.8);
   color: var(--ink);
-  text-align: center;
-  cursor: pointer;
-  transition: .2s;
   text-decoration: none;
+  transition: transform .18s ease, border-color .18s ease, background .18s ease;
+  flex: 0 0 auto;
 }
-.league-selector-card:hover { border-color: #566454; background: #1d2723; }
-.league-selector-card.active { border-color: var(--lime); background: #1d2723; box-shadow: 0 0 0 1px rgba(201, 242, 109, .3); }
-.league-logo-container { display: grid; place-items: center; width: 56px; height: 56px; border-radius: 6px; background: rgba(0, 0, 0, .3); border: 1px solid var(--line); }
-.league-logo { width: 48px; height: 48px; object-fit: contain; }
-.league-logo-fallback { display: grid; place-items: center; width: 100%; height: 100%; color: var(--lime); font: 700 11px 'DM Mono', monospace; letter-spacing: -.5px; }
-.league-info { display: grid; gap: 4px; min-width: 0; }
-.league-name { display: block; overflow: hidden; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; line-height: 1.2; }
-.league-country-info { display: flex; align-items: center; gap: 4px; justify-content: center; min-width: 0; }
-.country-flag { width: 16px; height: 16px; border-radius: 50%; object-fit: contain; }
-.country-flag.hidden { display: none; }
-.league-country { overflow: hidden; color: var(--muted); font: 8px 'DM Mono', monospace; text-overflow: ellipsis; white-space: nowrap; text-transform: uppercase; }
+.league-selector-card:hover {
+  border-color: rgba(201, 242, 109, 0.7);
+  background: #1d2723;
+  transform: translateY(-1px);
+}
+.league-selector-card.active {
+  border-color: var(--lime);
+  background: #1d2723;
+  box-shadow: 0 0 0 1px rgba(201, 242, 109, .24);
+}
+.league-logo-container {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.league-logo {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+.league-logo-fallback {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--lime);
+  font: 700 8px 'DM Mono', monospace;
+  text-transform: uppercase;
+}
+.league-info {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.league-name {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.league-country-info {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.country-flag {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.league-country {
+  overflow: hidden;
+  color: var(--muted);
+  font: 7px 'DM Mono', monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-/* League detail view: muestra partidos de una liga seleccionada */
 .league-detail-view { display: grid; gap: 20px; }
 
 @media (max-width: 900px) {
-  .league-selector-card { flex: 0 0 min(180px, 32%); }
+  .league-selector-card { min-width: 140px; }
 }
 
 @media (max-width: 600px) {
-  .league-selector-wrapper { scrollbar-width: thin; }
-  .league-selector-card { flex: 0 0 min(160px, 40%); padding: 12px 10px; }
-  .league-logo-container { width: 48px; height: 48px; }
-  .league-logo { width: 40px; height: 40px; }
-  .league-name { font-size: 10px; }
-  .league-country { font-size: 7px; }
-  .country-flag { width: 14px; height: 14px; }
+  .league-selector-card {
+    min-width: 130px;
+    padding: 9px 10px;
+    gap: 8px;
+  }
+  .league-logo-container {
+    width: 30px;
+    height: 30px;
+  }
+  .league-logo { width: 22px; height: 22px; }
+  .league-name { font-size: 9px; }
+  .league-country { font-size: 6px; }
+  .country-flag { width: 11px; height: 11px; }
 }
 
