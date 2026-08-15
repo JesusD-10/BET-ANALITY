@@ -2,28 +2,42 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useSearchParams } from "next/navigation";
-import { ArrowUpRight, ArrowLeft, Search } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Search } from "lucide-react";
 import AppShell, { PageHeader, ResponsibleNote } from "../components/AppShell";
 import LeagueSelector from "../components/LeagueSelector";
-import { ApiError, ApiTimeoutError, getMatches, isAbortError, type Match } from "../lib/api";
-import { findLeagueByName } from "../lib/leagues";
+import {
+  ApiError,
+  ApiTimeoutError,
+  getMatches,
+  isAbortError,
+  type Match,
+} from "../lib/api";
+import { findLeagueByName, getLeagueById } from "../lib/leagues";
 
 export default function PartidosPage() {
   const searchParams = useSearchParams();
   const selectedLeagueId = searchParams.get("liga");
+  const selectedLeague = selectedLeagueId ? getLeagueById(selectedLeagueId) : undefined;
   const [, startTransition] = useTransition();
 
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<Match[]>([]);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [retryVersion, setRetryVersion] = useState(0);
 
-  // Si hay una liga seleccionada, buscar partidos de esa liga
   useEffect(() => {
+    if (!selectedLeagueId) {
+      setMatches([]);
+      setError("");
+      setNotice("");
+      setLoading(false);
+      return;
+    }
+
     const controller = new AbortController();
     setLoading(true);
     setError("");
@@ -42,37 +56,38 @@ export default function PartidosPage() {
           setMatches([]);
           setNotice("");
           if (requestError instanceof ApiTimeoutError) {
-            setError("La agenda tardó demasiado en responder. Intenta nuevamente.");
+            setError("La agenda tardo demasiado en responder. Intenta nuevamente.");
           } else if (requestError instanceof ApiError && requestError.status >= 500) {
-            setError("El servicio de partidos no está disponible temporalmente.");
+            setError("El servicio de partidos no esta disponible temporalmente.");
           } else if (requestError instanceof ApiError) {
             setError(requestError.detail);
           } else {
-            setError("No se pudo conectar con el catálogo de partidos.");
+            setError("No se pudo conectar con el catalogo de partidos.");
           }
         })
         .finally(() => {
           if (!controller.signal.aborted) setLoading(false);
         });
     }, 250);
+
     return () => {
       window.clearTimeout(timer);
       controller.abort();
     };
   }, [selectedLeagueId, query, retryVersion]);
 
-  // Filtrar partidos por la liga seleccionada
-  const leagueMatches = selectedLeagueId
-    ? matches.filter((match) => {
-        const leagueInfo = findLeagueByName(match.competition);
-        return leagueInfo?.id === selectedLeagueId;
-      })
-    : [];
+  const leagueMatches = useMemo(() => {
+    if (!selectedLeagueId) return [];
+    return matches.filter((match) => {
+      const leagueInfo = findLeagueByName(match.competition);
+      return leagueInfo?.id === selectedLeagueId;
+    });
+  }, [matches, selectedLeagueId]);
 
   return (
     <AppShell>
       <PageHeader
-        eyebrow="AGENDA · BÚSQUEDA Y CALENDARIO"
+        eyebrow="AGENDA · BUSQUEDA Y CALENDARIO"
         title="Partidos"
         action={
           <Link className="outline-link" href="/">
@@ -84,10 +99,13 @@ export default function PartidosPage() {
       {!selectedLeagueId ? (
         <>
           <div className="page-toolbar">
-            <span className="date-label">Selecciona una liga para ver sus partidos</span>
+            <span className="date-label">
+              Ligas principales primero. Al hacer clic, se abre una pestaña nueva con sus
+              partidos.
+            </span>
           </div>
           <section className="league-browser">
-            <LeagueSelector selectedLeagueId={selectedLeagueId} />
+            <LeagueSelector selectedLeagueId={selectedLeagueId} openInNewTab />
           </section>
         </>
       ) : (
@@ -104,8 +122,8 @@ export default function PartidosPage() {
             <Link
               className="text-button"
               href="/partidos"
-              onClick={(e) => {
-                e.preventDefault();
+              onClick={(event) => {
+                event.preventDefault();
                 startTransition(() => {
                   window.history.pushState(null, "", "/partidos");
                 });
@@ -115,6 +133,12 @@ export default function PartidosPage() {
               Volver a ligas
             </Link>
           </div>
+
+          {selectedLeague && (
+            <p className="data-notice">
+              {selectedLeague.name} · {selectedLeague.country}
+            </p>
+          )}
 
           {notice && <p className="data-notice">{notice}</p>}
           {error && (
@@ -142,11 +166,7 @@ export default function PartidosPage() {
             ) : (
               <div className="match-list">
                 {leagueMatches.map((match) => (
-                  <Link
-                    className="match-list-row"
-                    href={`/partidos/${match.id}`}
-                    key={match.id}
-                  >
+                  <Link className="match-list-row" href={`/partidos/${match.id}`} key={match.id}>
                     <div>
                       <small>
                         {new Date(match.kickoff_at).toLocaleDateString("es-PE", {
@@ -184,67 +204,6 @@ export default function PartidosPage() {
         </>
       )}
 
-      <ResponsibleNote />
-    </AppShell>
-  );
-}
-      <div className="page-toolbar"><div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Equipo, liga o competición" /></div><span className="date-label">Organizados por competición</span></div>
-      {notice && <p className="data-notice">{notice}</p>}
-      {error && <div className="api-alert"><span>{error}</span><button className="text-button" type="button" onClick={() => setRetryVersion((value) => value + 1)}>Reintentar</button></div>}
-      <section className="competition-browser">
-        {loading ? (
-          <div className="empty-state">Consultando calendario...</div>
-        ) : error ? null : matches.length === 0 ? (
-          <div className="empty-state">{query.trim() ? `No encontramos partidos para “${query.trim()}”.` : "No hay partidos disponibles para hoy."}</div>
-        ) : (
-          <>
-            <div className="competition-grid" aria-label="Competiciones disponibles">
-              {grouped.map((group) => (
-                <button
-                  className={`competition-card ${selectedCompetition === group.competition ? "active" : ""}`}
-                  key={group.key}
-                  type="button"
-                  onClick={() => setSelectedCompetition(group.competition)}
-                >
-                  <span className="league-mark">{group.competition.slice(0, 2).toUpperCase()}</span>
-                  <span><strong>{group.competition}</strong><small>{group.matches.length} {group.matches.length === 1 ? "partido" : "partidos"}</small></span>
-                  <ArrowUpRight size={16} />
-                </button>
-              ))}
-            </div>
-            {selectedGroup ? (
-              <div className="competition-fixtures">
-                <div className="competition-fixtures-header">
-                  <div><small>COMPETICIÓN SELECCIONADA</small><h2>{selectedGroup.competition}</h2></div>
-                  <button type="button" className="text-button" onClick={() => setSelectedCompetition(null)}>Cambiar competición</button>
-                </div>
-                <div className="match-list">
-                {selectedGroup.matches.map((match) => (
-              <Link className="match-list-row" href={`/partidos/${match.id}`} key={match.id}>
-                <div>
-                  <small>{new Date(match.kickoff_at).toLocaleDateString("es-PE", { weekday: "short", day: "2-digit", month: "short" })} · {new Date(match.kickoff_at).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" })}</small>
-                  <strong>
-                    {match.home_logo && <img src={match.home_logo} alt="" className="row-team-logo" />}
-                    {match.home_team} <span>vs</span>{" "}
-                    {match.away_logo && <img src={match.away_logo} alt="" className="row-team-logo" />}
-                    {match.away_team}
-                  </strong>
-                </div>
-                <div className="row-meta">
-                  <span>{match.odds_available ? "Cuotas" : "Sin cuotas"}</span>
-                  <b>{Math.round(match.data_quality * 100)}%</b>
-                  <ArrowUpRight size={16} />
-                </div>
-              </Link>
-                ))}
-                </div>
-              </div>
-            ) : (
-              <div className="empty-state competition-prompt">Selecciona una competición para desplegar sus partidos.</div>
-            )}
-          </>
-        )}
-      </section>
       <ResponsibleNote />
     </AppShell>
   );

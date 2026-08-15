@@ -2,11 +2,13 @@
 "use client";
 
 import Link from "next/link";
-import { LEAGUES, type League } from "../lib/leagues";
+import { LEAGUES, sortLeaguesByPriority, type League } from "../lib/leagues";
 
 interface LeagueSelectorProps {
   /** ID de la liga actualmente seleccionada, si existe */
   selectedLeagueId?: string | null;
+  /** Abre el detalle de liga en una pestaña nueva */
+  openInNewTab?: boolean;
   /** Función callback cuando se selecciona una liga (no es Link directo) */
   onSelectLeague?: (league: League) => void;
 }
@@ -18,12 +20,15 @@ interface LeagueSelectorProps {
  */
 export default function LeagueSelector({
   selectedLeagueId,
+  openInNewTab = false,
   onSelectLeague,
 }: LeagueSelectorProps) {
+  const orderedLeagues = sortLeaguesByPriority(LEAGUES);
+
   return (
     <div className="league-selector-wrapper">
       <div className="league-selector" role="region" aria-label="Selecciona una liga">
-        {LEAGUES.map((league) => {
+        {orderedLeagues.map((league) => {
           const isSelected = selectedLeagueId === league.id;
           const href = `/partidos?liga=${encodeURIComponent(league.id)}`;
 
@@ -33,6 +38,8 @@ export default function LeagueSelector({
               href={href}
               className={`league-selector-card ${isSelected ? "active" : ""}`}
               onClick={() => onSelectLeague?.(league)}
+              target={openInNewTab ? "_blank" : undefined}
+              rel={openInNewTab ? "noopener noreferrer" : undefined}
               title={`${league.name} - ${league.country}`}
             >
               <div className="league-logo-container">
