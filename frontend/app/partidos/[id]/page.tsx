@@ -17,7 +17,9 @@ import {
 
 import AppShell, { ResponsibleNote } from "../../components/AppShell";
 import CombinationCard from "../../components/CombinationCard";
+import DataFreshness from "../../components/DataFreshness";
 import MatchHero from "../../components/MatchHero";
+import StatisticalContext from "../../components/StatisticalContext";
 import {
   ApiError,
   ApiTimeoutError,
@@ -29,11 +31,12 @@ import {
   type TeamLineup,
 } from "../../lib/api";
 
-type DetailTab = "summary" | "combinations" | "dream" | "injuries" | "lineups" | "h2h" | "assistant";
+type DetailTab = "summary" | "statistics" | "combinations" | "dream" | "injuries" | "lineups" | "h2h" | "assistant";
 type H2HTab = "meetings" | "home" | "away";
 
 const detailTabs: Array<{ id: DetailTab; label: string }> = [
   { id: "summary", label: "Resumen / Apuestas" },
+  { id: "statistics", label: "Estadísticas" },
   { id: "combinations", label: "Combinadas" },
   { id: "dream", label: "Soñadora" },
   { id: "injuries", label: "Bajas" },
@@ -69,7 +72,10 @@ function FormationPitch({ lineup, side }: { lineup: TeamLineup; side: "home" | "
   const rows = [ordered.slice(0, 1), ordered.slice(1, 5), ordered.slice(5, 8), ordered.slice(8, 11)];
 
   return (
-    <div className={`formation-pitch formation-pitch-${side}`} aria-label={`Simulación 4-3-3 de ${lineup.team_name}`}>
+    <div
+      className={`formation-pitch formation-pitch-${side}`}
+      aria-label={`Distribución visual${lineup.formation ? ` ${lineup.formation}` : ""} de ${lineup.team_name}`}
+    >
       <div className="pitch-halfway" aria-hidden="true" />
       {rows.map((row, rowIndex) => (
         <div className="formation-row" key={rowIndex}>
@@ -81,6 +87,39 @@ function FormationPitch({ lineup, side }: { lineup: TeamLineup; side: "home" | "
           ))}
         </div>
       ))}
+    </div>
+  );
+}
+
+function LineupRoster({ lineup }: { lineup: TeamLineup }) {
+  return (
+    <div className="lineup-roster">
+      <div>
+        <strong>Titulares</strong>
+        <ol>
+          {lineup.start_xi.map((player, index) => (
+            <li key={`starter-${player.id ?? player.name}-${index}`}>
+              <b>{player.number ?? "·"}</b>
+              <span>{player.name}</span>
+              {player.pos && <small>{player.pos}</small>}
+            </li>
+          ))}
+        </ol>
+      </div>
+      {lineup.substitutes.length > 0 && (
+        <div>
+          <strong>Suplentes</strong>
+          <ol>
+            {lineup.substitutes.map((player, index) => (
+              <li key={`substitute-${player.id ?? player.name}-${index}`}>
+                <b>{player.number ?? "·"}</b>
+                <span>{player.name}</span>
+                {player.pos && <small>{player.pos}</small>}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
     </div>
   );
 }
@@ -234,26 +273,49 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
     match,
     referee_info,
     discipline,
-    injuries,
+    injuries = [],
     lineups,
-    h2h_matches,
+    h2h_matches = [],
     home_recent_matches = [],
     away_recent_matches = [],
+    data_coverage = [],
+    statistics_summary,
+    standings,
+    provider_prediction,
+    player_context,
+    verified_odds = [],
+    ai_consensus,
     markets,
     combinations = [],
     dream_picks = [],
     notes,
   } = analysis;
+  const injuriesCoverage = data_coverage.find((item) => item.section === "injuries");
+  const lineupsCoverage = data_coverage.find((item) => item.section === "lineups");
+  const h2hCoverage = data_coverage.find((item) => item.section === "h2h");
+  const recentCoverage = data_coverage.find((item) => item.section === "recent_fixtures");
   const selectedHistory = activeH2HTab === "meetings"
     ? h2h_matches
     : activeH2HTab === "home"
       ? home_recent_matches
       : away_recent_matches;
-  const historyEmptyMessage = activeH2HTab === "meetings"
-    ? "Sin registro de enfrentamientos directos recientes."
-    : activeH2HTab === "home"
-      ? `Todavía no hay últimos partidos disponibles de ${match.home_team}.`
-      : `Todavía no hay últimos partidos disponibles de ${match.away_team}.`;
+  const selectedHistoryCoverage = activeH2HTab === "meetings" ? h2hCoverage : recentCoverage;
+  const historyEmptyMessage = selectedHistoryCoverage?.status === "available"
+    ? activeH2HTab === "meetings"
+      ? "La consulta no devolvió enfrentamientos directos finalizados recientes."
+      : `La consulta no devolvió últimos partidos finalizados de ${activeH2HTab === "home" ? match.home_team : match.away_team}.`
+    : selectedHistoryCoverage?.reason
+      ?? (activeH2HTab === "meetings"
+        ? "No fue posible verificar el historial H2H en la respuesta actual."
+        : "No fue posible verificar la forma reciente en la respuesta actual.");
+  const injuriesEmptyMessage = injuriesCoverage?.status === "available"
+    ? "El proveedor fue consultado y no devolvió bajas confirmadas para este partido."
+    : injuriesCoverage?.reason
+      ?? "No fue posible verificar lesiones o sanciones en la respuesta actual.";
+  const lineupsEmptyMessage = lineupsCoverage?.status === "available"
+    ? "El proveedor fue consultado y todavía no publicó alineaciones para este partido."
+    : lineupsCoverage?.reason
+      ?? "Las alineaciones reales aún no están disponibles; normalmente se publican cerca de 60 minutos antes.";
   const visibleHistory = selectedHistory.slice(0, historyExpanded ? 10 : 5);
   const h2hTabs: Array<{ id: H2HTab; label: string }> = [
     { id: "meetings", label: "Enfrentamientos directos" },
@@ -267,7 +329,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
         <ArrowLeft size={16} /> Volver a partidos
       </Link>
 
-      <MatchHero match={match} modelVersion={analysis.model_version} />
+      <MatchHero match={match} modelVersion={analysis.model_version} updatedAt={analysis.updated_at} />
 
       <div className="detail-tabs" role="tablist" aria-label="Secciones del análisis del partido">
         {detailTabs.map((tab, index) => (
@@ -430,6 +492,27 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       </section>
       )}
 
+      {activeTab === "statistics" && (
+      <section
+        className="detail-tab-panel"
+        id="detail-panel-statistics"
+        role="tabpanel"
+        aria-labelledby="detail-tab-statistics"
+        tabIndex={0}
+      >
+        <StatisticalContext
+          match={match}
+          coverage={data_coverage}
+          statistics={statistics_summary}
+          standings={standings}
+          players={player_context}
+          prediction={provider_prediction}
+          verifiedOdds={verified_odds}
+          consensus={ai_consensus}
+        />
+      </section>
+      )}
+
       {activeTab === "combinations" && (
       <section
         className="detail-tab-panel"
@@ -476,19 +559,23 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       {/* SECCIÓN DE JUGADORES LESIONADOS O SANCIONADOS */}
       {activeTab === "injuries" && (
       <section className="detail-tab-panel detail-data-panel" id="detail-panel-injuries" role="tabpanel" aria-labelledby="detail-tab-injuries" tabIndex={0}>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "1rem", color: "#ef4444" }}>
-          <UserX size={22} />
-          <h2 style={{ margin: 0, fontSize: "1.4rem" }}>Jugadores Lesionados & Sancionados</h2>
+        <div className="data-panel-heading">
+          <div className="data-panel-title data-panel-title-danger">
+            <UserX size={22} />
+            <h2>Jugadores lesionados y sancionados</h2>
+          </div>
+          {injuriesCoverage && <DataFreshness availability={injuriesCoverage} provenance={injuriesCoverage.provenance} />}
         </div>
         {injuries.length === 0 ? (
-          <p style={{ opacity: 0.8 }}>No se registran bajas confirmadas o sancionados para este partido.</p>
+          <p style={{ opacity: 0.8 }}>{injuriesEmptyMessage}</p>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "1rem" }}>
             {injuries.map((inj, idx) => (
-              <div key={idx} style={{ background: "rgba(0,0,0,0.2)", borderLeft: "4px solid #ef4444", borderRadius: "8px", padding: "0.8rem 1rem" }}>
-                <strong style={{ fontSize: "1.05rem", display: "block" }}>{inj.player}</strong>
-                <small style={{ color: "#9ca3af", display: "block" }}>{inj.team} · {inj.status}</small>
-                <p style={{ fontSize: "0.88rem", marginTop: "0.4rem", margin: 0 }}>Motivo: {inj.reason}</p>
+              <div className="injury-card" key={`${inj.player}-${inj.team}-${idx}`}>
+                <strong>{inj.player}</strong>
+                <small>{inj.team} · {inj.status}</small>
+                {inj.type && <span>{inj.type}</span>}
+                <p>Motivo: {inj.reason}</p>
               </div>
             ))}
           </div>
@@ -499,17 +586,20 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       {/* SECCIÓN DE ALINEACIONES */}
       {activeTab === "lineups" && (
       <section className="detail-tab-panel detail-data-panel" id="detail-panel-lineups" role="tabpanel" aria-labelledby="detail-tab-lineups" tabIndex={0}>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "1rem", color: "#10b981" }}>
-          <Users size={22} />
-          <h2 style={{ margin: 0, fontSize: "1.4rem" }}>
-            Alineaciones {lineups?.status === "confirmed"
-              ? "(Confirmadas)"
-              : lineups?.status === "partial"
-                ? "(Confirmación parcial)"
-                : lineups?.status === "probable"
-                  ? "(Probables)"
-                  : "(Pendientes)"}
-          </h2>
+        <div className="data-panel-heading">
+          <div className="data-panel-title data-panel-title-success">
+            <Users size={22} />
+            <h2>
+              Alineaciones {lineups?.status === "confirmed"
+                ? "(Confirmadas)"
+                : lineups?.status === "partial"
+                  ? "(Confirmación parcial)"
+                  : lineups?.status === "probable"
+                    ? "(Probables)"
+                    : "(Pendientes)"}
+            </h2>
+          </div>
+          {lineupsCoverage && <DataFreshness availability={lineupsCoverage} provenance={lineupsCoverage.provenance} />}
         </div>
         {lineups?.note && <p style={{ opacity: 0.82, marginTop: 0 }}>{lineups.note}</p>}
         <p className="formation-caption">Simulación visual 4-3-3. Si el proveedor publica otra formación, se conserva como dato informativo del equipo.</p>
@@ -523,6 +613,7 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                 {lineups.home.coach && <small style={{ display: "block", marginBottom: "0.6rem" }}>DT: {lineups.home.coach}</small>}
                 <small style={{ display: "block", marginBottom: "0.6rem", opacity: 0.75 }}>{lineupEvidence(lineups.home)}</small>
                 <FormationPitch lineup={lineups.home} side="home" />
+                <LineupRoster lineup={lineups.home} />
               </div>
             )}
             {lineups.away && (
@@ -533,11 +624,12 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
                 {lineups.away.coach && <small style={{ display: "block", marginBottom: "0.6rem" }}>DT: {lineups.away.coach}</small>}
                 <small style={{ display: "block", marginBottom: "0.6rem", opacity: 0.75 }}>{lineupEvidence(lineups.away)}</small>
                 <FormationPitch lineup={lineups.away} side="away" />
+                <LineupRoster lineup={lineups.away} />
               </div>
             )}
           </div>
         ) : (
-          <p style={{ opacity: 0.8 }}>Todavía no hay historial suficiente para una alineación probable. Los once reales solo aparecerán cuando el proveedor los publique, normalmente cerca de 60 minutos antes.</p>
+          <p style={{ opacity: 0.8 }}>{lineupsEmptyMessage}</p>
         )}
       </section>
       )}
@@ -545,9 +637,12 @@ export default function MatchDetailPage({ params }: { params: Promise<{ id: stri
       {/* HISTORIAL DIRECTO H2H */}
       {activeTab === "h2h" && (
       <section className="detail-tab-panel detail-data-panel" id="detail-panel-h2h" role="tabpanel" aria-labelledby="detail-tab-h2h" tabIndex={0}>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "1rem", color: "#a855f7" }}>
-          <History size={22} />
-          <h2 style={{ margin: 0, fontSize: "1.4rem" }}>Historial y forma reciente</h2>
+        <div className="data-panel-heading">
+          <div className="data-panel-title data-panel-title-history">
+            <History size={22} />
+            <h2>Historial y forma reciente</h2>
+          </div>
+          {selectedHistoryCoverage && <DataFreshness availability={selectedHistoryCoverage} provenance={selectedHistoryCoverage.provenance} />}
         </div>
 
         <div className="h2h-subtabs" role="tablist" aria-label="Vistas del historial del partido">

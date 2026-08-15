@@ -4,11 +4,13 @@ import logging
 import unicodedata
 
 from app.schemas.matches import (
+    AIConsensusSummary,
     H2HMatchItem,
     InjuryItem,
     LineupsSummary,
     MarketAnalysis,
     MatchAnalysisResponse,
+    MatchEvidenceContext,
     MatchSummary,
     RefereeInfo,
 )
@@ -21,6 +23,166 @@ from app.services.opportunities import (
 from app.services.ai_gateway import AICompletion, ai_gateway
 
 logger = logging.getLogger(__name__)
+
+
+def _trusted_evidence_sections(evidence: MatchEvidenceContext | None) -> set[str]:
+    """Return sections that are both declared available and traceable.
+
+    A payload without an explicit verified source is never sent to an AI, even
+    if the caller accidentally populated one of the statistical blocks.
+    """
+
+    if evidence is None:
+        return set()
+    trusted: set[str] = set()
+    for item in evidence.data_coverage:
+        if item.status not in {"available", "partial"}:
+            continue
+        if any(source.verified for source in item.provenance):
+            trusted.add(item.section)
+    return trusted
+
+
+def _evidence_response_fields(evidence: MatchEvidenceContext | None) -> dict:
+    if evidence is None:
+        return {}
+    trusted = _trusted_evidence_sections(evidence)
+    return {
+        "data_coverage": evidence.data_coverage,
+        "statistics_summary": (
+            evidence.statistics_summary if "team_statistics" in trusted else None
+        ),
+        "standings": evidence.standings if "standings" in trusted else None,
+        "provider_prediction": (
+            evidence.provider_prediction if "provider_prediction" in trusted else None
+        ),
+        "player_context": evidence.player_context if "players" in trusted else None,
+        "verified_odds": evidence.verified_odds if "verified_odds" in trusted else [],
+    }
+
+
+def _structured_evidence_payload(evidence: MatchEvidenceContext | None) -> dict:
+    """Build the exact, provenance-gated payload shared by all AI providers.
+
+    Verified bookmaker prices are intentionally redacted. Their market keys can
+    constrain availability, but probabilities/fair odds must be estimated from
+    sporting evidence and cannot be anchored to an implied bookmaker price.
+    """
+
+    if evidence is None:
+        return {}
+    trusted = _trusted_evidence_sections(evidence)
+    payload: dict[str, object] = {
+        "data_coverage": [
+            item.model_dump(mode="json", exclude_none=True)
+            for item in evidence.data_coverage
+        ]
+    }
+    section_values: tuple[tuple[str, str, object], ...] = (
+        ("team_statistics", "statistics_summary", evidence.statistics_summary),
+        ("standings", "standings", evidence.standings),
+        ("h2h", "h2h", evidence.h2h),
+        ("recent_fixtures", "recent_fixtures", evidence.recent_fixtures),
+        ("players", "player_context", evidence.player_context),
+        ("injuries", "injuries", evidence.injuries),
+        ("lineups", "lineups", evidence.lineups),
+        ("provider_prediction", "provider_prediction", evidence.provider_prediction),
+    )
+    for section, key, value in section_values:
+        if section not in trusted or value is None or value == []:
+            continue
+        if hasattr(value, "model_dump"):
+            payload[key] = value.model_dump(mode="json", exclude_none=True)
+        elif isinstance(value, list):
+            payload[key] = [
+                item.model_dump(mode="json", exclude_none=True)
+                if hasattr(item, "model_dump")
+                else item
+                for item in value
+            ]
+        else:
+            payload[key] = value
+
+    if "verified_odds" in trusted:
+        payload["verified_market_availability"] = [
+            {
+                "market_key": quote.market_key,
+                "selection": quote.selection,
+                "live": quote.live,
+            }
+            for quote in evidence.verified_odds
+        ]
+    return payload
+
+
+def _evidence_limitations(evidence: MatchEvidenceContext | None) -> list[str]:
+    if evidence is None:
+        return []
+    return [
+        f"{item.section}: {item.reason or item.status}"
+        for item in evidence.data_coverage
+        if item.status != "available"
+    ]
+
+
+def _fixture_evidence_history(items: list) -> list[dict]:
+    return [
+        {
+            "fixture": {"id": item.fixture_id, "date": item.date},
+            "competition": item.competition,
+            "teams": {
+                "home": {"name": item.home_team},
+                "away": {"name": item.away_team},
+            },
+            "goals": {"home": item.home_goals, "away": item.away_goals},
+            "statistics": [
+                {"team": item.home_team, **item.home_statistics},
+                {"team": item.away_team, **item.away_statistics},
+            ],
+        }
+        for item in items
+    ]
+
+
+def _ai_consensus_summary(completions: list[AICompletion]) -> AIConsensusSummary:
+    completed = len(completions)
+    providers = [completion.provider for completion in completions]
+    required_support = 1 if completed == 1 else 2 if completed >= 2 else 0
+    if completed >= 4:
+        status = "consensus"
+        reason = None
+    elif completed >= 2:
+        status = "partial"
+        reason = f"Respondieron {completed} de los 4 proveedores solicitados."
+    elif completed == 1:
+        status = "single"
+        reason = "Respondió 1 de los 4 proveedores; no existe consenso independiente."
+    else:
+        status = "unavailable"
+        reason = "Ningún proveedor devolvió una respuesta válida."
+    return AIConsensusSummary(
+        requested=4,
+        completed=completed,
+        providers=providers,
+        required_support=required_support,
+        status=status,
+        reason=reason,
+    )
+
+
+def _fallback_consensus_summary(completions: list[AICompletion]) -> AIConsensusSummary:
+    completed = len(completions)
+    return AIConsensusSummary(
+        requested=4,
+        completed=completed,
+        providers=[completion.provider for completion in completions],
+        required_support=1 if completed == 1 else 2 if completed >= 2 else 0,
+        status="fallback",
+        reason=(
+            f"Respondieron {completed} proveedores, pero ninguna selección superó "
+            "la validación de consenso y evidencia; se aplicó el modelo local."
+        ),
+    )
 
 
 def _provider_blocks(
@@ -56,14 +218,44 @@ def _has_metric(blocks: list[dict], *path: str) -> bool:
     return False
 
 
+def _normalized_metric_key(value: object) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "").casefold())
+    return "_".join(
+        "".join(character for character in token if not unicodedata.combining(character))
+        for token in normalized.replace("-", " ").split()
+    )
+
+
+def _mapping_has_metric(mapping: dict, names: set[str]) -> bool:
+    normalized_names = {_normalized_metric_key(name) for name in names}
+    return any(
+        value is not None and _normalized_metric_key(key) in normalized_names
+        for key, value in mapping.items()
+    )
+
+
 def _available_market_families(
     referee_info: RefereeInfo | None,
     home_history: list[dict | H2HMatchItem],
     away_history: list[dict | H2HMatchItem],
+    evidence: MatchEvidenceContext | None = None,
 ) -> set[str]:
     histories = [*home_history, *away_history]
-    team_statistics = list(_provider_blocks(histories, "statistics"))
-    player_statistics = list(_provider_blocks(histories, "player_statistics"))
+    trusted = _trusted_evidence_sections(evidence)
+    trust_legacy_team_statistics = evidence is None or bool(
+        {"team_statistics", "recent_fixtures"} & trusted
+    )
+    trust_legacy_player_statistics = evidence is None or "players" in trusted
+    team_statistics = (
+        list(_provider_blocks(histories, "statistics"))
+        if trust_legacy_team_statistics
+        else []
+    )
+    player_statistics = (
+        list(_provider_blocks(histories, "player_statistics"))
+        if trust_legacy_player_statistics
+        else []
+    )
     available = {"result", "goals"}
 
     if (
@@ -81,6 +273,51 @@ def _available_market_families(
         available.add("player_shots_on_target")
     if _has_metric(player_statistics, "goals", "total"):
         available.add("player_goals")
+
+    if evidence and "team_statistics" in trusted and evidence.statistics_summary:
+        team_mappings: list[dict] = []
+        for team in (evidence.statistics_summary.home, evidence.statistics_summary.away):
+            if team:
+                team_mappings.extend((team.averages, team.rates))
+        for fixture in (
+            evidence.statistics_summary.home_recent_fixtures
+            + evidence.statistics_summary.away_recent_fixtures
+        ):
+            team_mappings.extend((fixture.home_statistics, fixture.away_statistics))
+        if any(
+            _mapping_has_metric(mapping, {"yellow_cards", "red_cards", "cards"})
+            for mapping in team_mappings
+        ):
+            available.add("cards")
+        if any(
+            _mapping_has_metric(mapping, {"corners", "corner_kicks"})
+            for mapping in team_mappings
+        ):
+            available.add("corners")
+        if any(
+            _mapping_has_metric(
+                mapping,
+                {"total_shots", "shots", "shots_on_target", "shots_on_goal"},
+            )
+            for mapping in team_mappings
+        ):
+            available.add("team_shots")
+
+    if evidence and "players" in trusted and evidence.player_context:
+        players = [
+            *evidence.player_context.home,
+            *evidence.player_context.away,
+            *evidence.player_context.top_scorers,
+            *evidence.player_context.top_assists,
+            *evidence.player_context.top_yellow_cards,
+            *evidence.player_context.top_red_cards,
+        ]
+        if any(player.shots is not None for player in players):
+            available.add("player_shots")
+        if any(player.shots_on_target is not None for player in players):
+            available.add("player_shots_on_target")
+        if any(player.goals is not None for player in players):
+            available.add("player_goals")
     return available
 
 
@@ -180,6 +417,7 @@ def _consensus_market_payloads(
 
         factors_for = _merge_text_items(supporters, "factors_for")
         risks = _merge_text_items(supporters, "risks")
+        evidence_refs = _merge_text_items(supporters, "evidence_refs")
         if factors_for:
             consensus_market["factors_for"] = factors_for
         else:
@@ -188,6 +426,10 @@ def _consensus_market_payloads(
             consensus_market["risks"] = risks
         else:
             consensus_market.pop("risks", None)
+        if evidence_refs:
+            consensus_market["evidence_refs"] = evidence_refs
+        else:
+            consensus_market.pop("evidence_refs", None)
 
         quality_estimates: list[float] = []
         for raw_market, _ in supporters:
@@ -280,7 +522,12 @@ def _bounded_data_quality(value: object, ceiling: float) -> float:
     return max(0.0, min(ceiling, parsed))
 
 
-def _format_recent_history(history: list[dict | H2HMatchItem], limit: int = 5) -> str:
+def _format_recent_history(
+    history: list[dict | H2HMatchItem],
+    limit: int = 5,
+    *,
+    include_statistics: bool = True,
+) -> str:
     if not history:
         return "Sin partidos recientes provistos por la API."
 
@@ -300,9 +547,10 @@ def _format_recent_history(history: list[dict | H2HMatchItem], limit: int = 5) -
         }
         # Only canonical blocks enter the prompt. The raw ``players`` payload
         # duplicates these values and can be much larger.
-        for key in ("statistics", "player_statistics"):
-            if item.get(key) is not None:
-                compact[key] = item[key]
+        if include_statistics:
+            for key in ("statistics", "player_statistics"):
+                if item.get(key) is not None:
+                    compact[key] = item[key]
         compact_items.append({key: value for key, value in compact.items() if value is not None})
 
     return "\n".join(
@@ -320,11 +568,37 @@ def analyze_match_with_ai(
     home_last_matches: list[dict | H2HMatchItem] | None = None,
     away_last_matches: list[dict | H2HMatchItem] | None = None,
     allow_external_ai: bool = True,
+    evidence: MatchEvidenceContext | None = None,
 ) -> MatchAnalysisResponse:
-    injuries_list = injuries or []
-    h2h_list = h2h_matches or []
+    trusted = _trusted_evidence_sections(evidence)
+    injuries_list = (
+        evidence.injuries
+        if evidence is not None and "injuries" in trusted
+        else injuries or []
+    )
+    h2h_list = (
+        evidence.h2h if evidence is not None and "h2h" in trusted else h2h_matches or []
+    )
+    effective_lineups = (
+        evidence.lineups
+        if evidence is not None and "lineups" in trusted
+        else lineups
+    )
     home_history = home_last_matches or []
     away_history = away_last_matches or []
+    if (
+        evidence is not None
+        and "team_statistics" in trusted
+        and evidence.statistics_summary is not None
+    ):
+        if not home_history:
+            home_history = _fixture_evidence_history(
+                evidence.statistics_summary.home_recent_fixtures
+            )
+        if not away_history:
+            away_history = _fixture_evidence_history(
+                evidence.statistics_summary.away_recent_fixtures
+            )
 
     if allow_external_ai and ai_gateway.is_available():
         try:
@@ -332,10 +606,11 @@ def analyze_match_with_ai(
                 match=match,
                 referee_info=referee_info,
                 injuries=injuries_list,
-                lineups=lineups,
+                lineups=effective_lineups,
                 h2h_matches=h2h_list,
                 home_history=home_history,
                 away_history=away_history,
+                evidence=evidence,
             )
             return enrich_analysis_with_opportunities(analysis)
         except Exception as exc:
@@ -349,10 +624,23 @@ def analyze_match_with_ai(
             match=match,
             referee_info=referee_info,
             injuries=injuries_list,
-            lineups=lineups,
+            lineups=effective_lineups,
             h2h_matches=h2h_list,
             home_history=home_history,
             away_history=away_history,
+            evidence=evidence,
+            ai_consensus=AIConsensusSummary(
+                requested=4,
+                completed=0,
+                providers=[],
+                required_support=0,
+                status="fallback",
+                reason=(
+                    "El consenso externo falló y se aplicó el modelo local."
+                    if allow_external_ai
+                    else "La IA externa fue desactivada para esta ejecución."
+                ),
+            ),
         )
     )
 
@@ -365,9 +653,23 @@ def _query_distributed_ai_analysis(
     h2h_matches: list[H2HMatchItem],
     home_history: list[dict | H2HMatchItem],
     away_history: list[dict | H2HMatchItem],
+    evidence: MatchEvidenceContext | None = None,
 ) -> MatchAnalysisResponse:
-    h2h_text = "\n".join([f"- {m.date} | {m.home_team} {m.score} {m.away_team} (Ganador: {m.winner})" for m in h2h_matches[:10]]) or "Sin historial directo reciente."
-    injuries_text = "\n".join([f"- {inj.team}: {inj.player} ({inj.reason} - {inj.status})" for inj in injuries]) or "Sin datos verificados de bajas o lesionados para este análisis."
+    trusted = _trusted_evidence_sections(evidence)
+    h2h_text = "\n".join([f"- {m.date} | {m.home_team} {m.score} {m.away_team} (Ganador: {m.winner})" for m in h2h_matches[:10]])
+    if not h2h_text:
+        h2h_text = (
+            "Consulta verificada sin enfrentamientos directos publicados."
+            if "h2h" in trusted
+            else "Sin historial directo reciente verificado."
+        )
+    injuries_text = "\n".join([f"- {inj.team}: {inj.player} ({inj.reason} - {inj.status})" for inj in injuries])
+    if not injuries_text:
+        injuries_text = (
+            "Consulta verificada: el proveedor no reporta bajas para este partido."
+            if "injuries" in trusted
+            else "Sin datos verificados de bajas o lesionados para este análisis."
+        )
     
     lineup_text = "Sin alineaciones verificadas disponibles para este análisis."
     if lineups and lineups.confirmed and lineups.home and lineups.away:
@@ -383,17 +685,55 @@ def _query_distributed_ai_analysis(
     if referee_info:
         referee_text += f" (Amonestaciones promedio: {referee_info.yellow_cards_avg or 'N/D'}, Rojas: {referee_info.red_cards_avg or 'N/D'}, Tendencia: {referee_info.tendency or 'Normal'})"
 
-    home_form_text = f"Forma reciente de {match.home_team}: {match.home_form or 'N/D'}"
-    away_form_text = f"Forma reciente de {match.away_team}: {match.away_form or 'N/D'}"
-    home_history_text = _format_recent_history(home_history)
-    away_history_text = _format_recent_history(away_history)
-    available_families = _available_market_families(referee_info, home_history, away_history)
+    form_is_trusted = evidence is None or bool(
+        {"team_statistics", "recent_fixtures"} & trusted
+    )
+    home_form_text = (
+        f"Forma reciente de {match.home_team}: {match.home_form or 'N/D'}"
+        if form_is_trusted
+        else f"Forma reciente de {match.home_team}: no verificada"
+    )
+    away_form_text = (
+        f"Forma reciente de {match.away_team}: {match.away_form or 'N/D'}"
+        if form_is_trusted
+        else f"Forma reciente de {match.away_team}: no verificada"
+    )
+    if form_is_trusted:
+        # The structured block already carries normalized team/player metrics;
+        # keep only fixture identity and score in the legacy display to avoid
+        # sending the same observations twice to each of the four providers.
+        include_legacy_statistics = evidence is None
+        home_history_text = _format_recent_history(
+            home_history,
+            include_statistics=include_legacy_statistics,
+        )
+        away_history_text = _format_recent_history(
+            away_history,
+            include_statistics=include_legacy_statistics,
+        )
+    else:
+        home_history_text = "Sin partidos recientes con proveniencia verificada."
+        away_history_text = "Sin partidos recientes con proveniencia verificada."
+    available_families = _available_market_families(
+        referee_info,
+        home_history,
+        away_history,
+        evidence,
+    )
     supported_market_text = ", ".join(sorted(available_families))
     market_key_examples = ", ".join(
         prefixes[0]
         for family, prefixes in MARKET_TAXONOMY.items()
         if family in available_families
     )
+    structured_evidence = _structured_evidence_payload(evidence)
+    structured_evidence_text = (
+        json.dumps(structured_evidence, ensure_ascii=False, default=str, separators=(",", ":"))
+        if structured_evidence
+        else "Sin contexto estadístico estructurado adicional."
+    )
+    limitations = _evidence_limitations(evidence)
+    limitations_text = "\n".join(f"- {item}" for item in limitations) or "- Ninguna limitación adicional declarada."
 
     prompt_context = f"""
 Eres un analista experto en apuestas y probabilidad deportiva cuantitativa. Analiza este partido de fútbol ÚNICO y genera recomendaciones verdaderamente adaptadas a las características tácticas de ESTOS dos equipos.
@@ -422,13 +762,22 @@ BAJAS Y LESIONADOS:
 ALINEACIONES:
 {lineup_text}
 
+EVIDENCIA ESTRUCTURADA VERIFICADA (los null significan dato ausente):
+{structured_evidence_text}
+
+LIMITACIONES DE COBERTURA:
+{limitations_text}
+
 INSTRUCCIONES CLAVE:
 1. No generes siempre los mismos mercados para todos los partidos. Selecciona 3 o 4 mercados con respaldo cuantitativo para este choque.
 2. Calcula probabilidades realistas (entre 0.05 y 0.95) y ajusta la "fair_odds" (1 / probabilidad).
 3. Adapta las tarjetas promedio y tendencias del árbitro a las estadísticas entregadas. No inventes 4.2 tarjetas si el árbitro o partido sugieren otra métrica.
 4. Familias habilitadas por los datos recibidos: {supported_market_text}. Usa claves compatibles, por ejemplo: {market_key_examples}.
 5. Córners, remates de equipo, remates de jugador y goleadores son mercados válidos del sistema, pero SOLO puedes devolverlos cuando el contexto incluya estadísticas explícitas de esa familia. Una alineación o una descripción táctica no basta. No inventes jugadores, volúmenes ni promedios.
-6. "best_odds" y "expected_value" deben ser null porque este contexto no incluye cotizaciones verificadas de una casa. "fair_odds" sí es la cuota justa del modelo.
+6. Trata cada null, sección unavailable/not_requested o bloque ausente como desconocido. No completes, extrapoles ni inventes estadísticas. Cita en `evidence_refs` únicamente secciones presentes y verificadas.
+7. La lista `verified_market_availability` NO contiene precios deliberadamente: sirve solo para saber qué selecciones existen. No deduzcas probabilidades implícitas, no ancles tu estimación al bookmaker y no copies una cuota comercial como `fair_odds`.
+8. "best_odds" y "expected_value" deben ser null. El backend superpondrá después la cotización exacta verificada y calculará EV. "fair_odds" sí es 1/probabilidad estimada exclusivamente con evidencia deportiva.
+9. `provider_prediction` es una señal estadística externa y falible, no una verdad ni sustituto de las estadísticas observadas; explica cualquier desacuerdo con forma, H2H, plantillas o lesiones.
 
 Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estructura:
 {{
@@ -447,7 +796,8 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
       "confidence": "Alta | Media-alta | Media | Baja",
       "data_quality": 0.90,
       "factors_for": ["Factor específico 1 a favor", "Factor específico 2 a favor"],
-      "risks": ["Riesgo específico 1", "Riesgo específico 2"]
+      "risks": ["Riesgo específico 1", "Riesgo específico 2"],
+      "evidence_refs": ["team_statistics", "recent_fixtures", "injuries"]
     }}
   ],
   "notes": ["Nota relevante 1", "Nota relevante 2"]
@@ -465,13 +815,30 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
     primary_completion = completions[0]
     parsed = primary_completion.json_data or {}
 
-    available_families = _available_market_families(referee_info, home_history, away_history)
+    available_families = _available_market_families(
+        referee_info,
+        home_history,
+        away_history,
+        evidence,
+    )
     raw_markets = _consensus_market_payloads(completions, available_families)
     markets = []
+    trusted_sporting_refs = _trusted_evidence_sections(evidence) - {"verified_odds"}
     for m in raw_markets:
         market_key = str(m.get("market_key", "")).strip().upper()
         if not _market_has_evidence(market_key, available_families):
             logger.info("Mercado %s descartado por falta de datos verificables.", market_key or "sin-clave")
+            continue
+        evidence_refs = [
+            str(reference)
+            for reference in m.get("evidence_refs", [])
+            if str(reference) in trusted_sporting_refs
+        ]
+        if evidence is not None and not evidence_refs:
+            logger.info(
+                "Mercado %s descartado porque la IA no citó evidencia deportiva verificada.",
+                market_key or "sin-clave",
+            )
             continue
         prob = float(m.get("probability", 0.5))
         prob = max(0.05, min(0.95, prob))
@@ -494,6 +861,7 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
                 ),
                 factors_for=m.get("factors_for", ["Análisis respaldado por forma reciente"]),
                 risks=m.get("risks", ["Varianza estándar de partido"]),
+                evidence_refs=evidence_refs,
             )
         )
 
@@ -506,6 +874,8 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
             h2h_matches,
             home_history,
             away_history,
+            evidence=evidence,
+            ai_consensus=_fallback_consensus_summary(completions),
         )
 
     if len(completions) > 1:
@@ -537,11 +907,13 @@ Debes responder ÚNICAMENTE con un objeto JSON estricto con la siguiente estruct
         injuries=injuries,
         lineups=lineups,
         h2h_matches=h2h_matches,
+        ai_consensus=_ai_consensus_summary(completions),
         tactical_summary=parsed.get("tactical_summary"),
         injuries_impact=parsed.get("injuries_impact"),
         referee_impact=parsed.get("referee_impact"),
         markets=markets,
         notes=notes,
+        **_evidence_response_fields(evidence),
     )
 
 
@@ -696,6 +1068,7 @@ def _local_market(
     data_quality: float,
     factors_for: list[str],
     risks: list[str],
+    evidence_refs: list[str] | None = None,
 ) -> MarketAnalysis:
     probability = _clamp_probability(probability)
     return MarketAnalysis(
@@ -710,6 +1083,7 @@ def _local_market(
         data_quality=data_quality,
         factors_for=factors_for,
         risks=risks,
+        evidence_refs=evidence_refs or [],
     )
 
 
@@ -721,11 +1095,23 @@ def _generate_local_fallback_analysis(
     h2h_matches: list[H2HMatchItem],
     home_history: list[dict | H2HMatchItem] | None = None,
     away_history: list[dict | H2HMatchItem] | None = None,
+    evidence: MatchEvidenceContext | None = None,
+    ai_consensus: AIConsensusSummary | None = None,
 ) -> MatchAnalysisResponse:
     """Build match-specific markets from form and scores, with an honest prior."""
 
     home_history = home_history or []
     away_history = away_history or []
+    trusted = _trusted_evidence_sections(evidence)
+    statistics_summary = (
+        evidence.statistics_summary
+        if evidence is not None
+        and "team_statistics" in trusted
+        and evidence.statistics_summary is not None
+        else None
+    )
+    home_snapshot = statistics_summary.home if statistics_summary else None
+    away_snapshot = statistics_summary.away if statistics_summary else None
     referee_obj = referee_info or RefereeInfo(
         name=match.referee or "Sin designar",
         tendency="Sin métricas arbitrales verificadas",
@@ -734,14 +1120,36 @@ def _generate_local_fallback_analysis(
         match.home_team,
         match.home_team_id,
         home_history,
-        match.home_form,
+        (home_snapshot.form if home_snapshot and home_snapshot.form else match.home_form),
     )
     away_rate, away_games, away_gf, away_ga = _team_form_profile(
         match.away_team,
         match.away_team_id,
         away_history,
-        match.away_form,
+        (away_snapshot.form if away_snapshot and away_snapshot.form else match.away_form),
     )
+    if not home_history and home_snapshot:
+        played = home_snapshot.fixtures_played or 0
+        if played and home_snapshot.wins is not None and home_snapshot.draws is not None:
+            home_rate = (home_snapshot.wins * 3 + home_snapshot.draws) / (played * 3)
+            home_games = played
+        home_gf = home_snapshot.goals_for_avg if home_snapshot.goals_for_avg is not None else home_gf
+        home_ga = (
+            home_snapshot.goals_against_avg
+            if home_snapshot.goals_against_avg is not None
+            else home_ga
+        )
+    if not away_history and away_snapshot:
+        played = away_snapshot.fixtures_played or 0
+        if played and away_snapshot.wins is not None and away_snapshot.draws is not None:
+            away_rate = (away_snapshot.wins * 3 + away_snapshot.draws) / (played * 3)
+            away_games = played
+        away_gf = away_snapshot.goals_for_avg if away_snapshot.goals_for_avg is not None else away_gf
+        away_ga = (
+            away_snapshot.goals_against_avg
+            if away_snapshot.goals_against_avg is not None
+            else away_ga
+        )
     goal_samples, avg_total, over_1_5, over_2_5, under_3_5, btts_yes = _goal_profile(
         home_history,
         away_history,
@@ -749,6 +1157,16 @@ def _generate_local_fallback_analysis(
     )
 
     evidence_samples = min(10, home_games + away_games + min(goal_samples, 4))
+    form_evidence_refs = [
+        section
+        for section in ("team_statistics", "recent_fixtures")
+        if section in trusted
+    ]
+    goal_evidence_refs = [
+        section
+        for section in ("recent_fixtures", "h2h")
+        if section in trusted
+    ]
     data_quality = round(
         min(match.data_quality, 0.52 + evidence_samples * 0.035),
         2,
@@ -790,6 +1208,7 @@ def _generate_local_fallback_analysis(
             data_quality=data_quality,
             factors_for=[form_factor, "La doble oportunidad cubre también el empate"],
             risks=[f"Una derrota de {protected_team} invalida la selección"],
+            evidence_refs=form_evidence_refs,
         ),
         _local_market(
             market_key="TOTAL_GOALS_OVER_1_5",
@@ -799,6 +1218,7 @@ def _generate_local_fallback_analysis(
             data_quality=data_quality,
             factors_for=[goal_factor],
             risks=["Un partido cerrado o con baja eficacia puede quedar por debajo de dos goles"],
+            evidence_refs=goal_evidence_refs,
         ),
         _local_market(
             market_key="TOTAL_GOALS_UNDER_3_5",
@@ -808,6 +1228,7 @@ def _generate_local_fallback_analysis(
             data_quality=data_quality,
             factors_for=[goal_factor],
             risks=["Un gol temprano puede abrir el partido y elevar el marcador"],
+            evidence_refs=goal_evidence_refs,
         ),
         _local_market(
             market_key="BOTH_TEAMS_TO_SCORE",
@@ -817,6 +1238,7 @@ def _generate_local_fallback_analysis(
             data_quality=data_quality,
             factors_for=[goal_factor],
             risks=["La selección depende de la eficacia de ambos ataques y defensas"],
+            evidence_refs=goal_evidence_refs,
         ),
         _local_market(
             market_key=goals_2_5_key,
@@ -826,6 +1248,7 @@ def _generate_local_fallback_analysis(
             data_quality=data_quality,
             factors_for=[goal_factor],
             risks=["La línea de 2.5 tiene mayor varianza que los umbrales protegidos"],
+            evidence_refs=goal_evidence_refs,
         ),
     ]
     markets = sorted(
@@ -842,6 +1265,7 @@ def _generate_local_fallback_analysis(
         injuries=injuries,
         lineups=lineups,
         h2h_matches=h2h_matches,
+        ai_consensus=ai_consensus,
         tactical_summary=(
             f"{match.home_team} vs {match.away_team}: la lectura local compara forma, "
             f"producción de goles y {goal_samples} marcadores recientes únicos."
@@ -858,5 +1282,7 @@ def _generate_local_fallback_analysis(
             "Cuota justa calculada inversamente a la probabilidad estimada.",
             "best_odds y EV permanecen vacíos cuando no existe una cotización verificada.",
             "Córners, remates y mercados de jugador se omiten cuando la API no aporta estadísticas específicas.",
+            *_evidence_limitations(evidence),
         ],
+        **_evidence_response_fields(evidence),
     )

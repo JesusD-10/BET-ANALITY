@@ -5,10 +5,16 @@ import type { Match } from "../lib/api";
 export default function MatchHero({
   match,
   modelVersion,
+  updatedAt,
 }: {
   match: Match;
   modelVersion: string;
+  updatedAt?: string;
 }) {
+  const provider = match.source_provider
+    ? match.source_provider.replaceAll("-", " ")
+    : null;
+
   return (
     <header className="match-detail-header match-hero">
       <p className="eyebrow match-hero-eyebrow">
@@ -36,6 +42,15 @@ export default function MatchHero({
         <span>{match.status}</span>
         <span>Calidad {Math.round(match.data_quality * 100)}%</span>
         <span>Modelo: {modelVersion}</span>
+        {provider && <span>Datos: {provider}</span>}
+        {updatedAt && (
+          <span>
+            Actualizado: {new Date(updatedAt).toLocaleString("es-PE", {
+              dateStyle: "short",
+              timeStyle: "short",
+            })}
+          </span>
+        )}
         {match.venue && <span>Estadio: {match.venue}</span>}
       </div>
     </header>

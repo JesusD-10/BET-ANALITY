@@ -22,6 +22,7 @@ from app.schemas.matches import (
 )
 from app.services.ai_analyzer import analyze_match_with_ai
 from app.services.api_football import APIFootballAPIError, APIFootballProvider, BookmakerQuote
+from app.services.match_evidence import build_match_evidence
 from app.services.opportunities import enrich_analysis_with_opportunities
 from app.services.sportmonks import SportmonksAPIError, SportmonksProvider
 
@@ -876,6 +877,18 @@ def _future_value(future: Future | None, default):
         return default
 
 
+def _future_result(future: Future | None, default) -> tuple[object, bool]:
+    """Return a complementary value and preserve whether its request failed."""
+
+    if future is None:
+        return default, False
+    try:
+        return future.result(), False
+    except Exception as exc:
+        logger.warning("Dato complementario no disponible: %s", exc)
+        return default, True
+
+
 def _history_future_value(future: Future | None) -> tuple[list, bool]:
     """Return history plus an explicit transient-failure flag.
 
@@ -964,8 +977,11 @@ def _derive_h2h_from_team_histories(
                 continue
             raw_ids = {side[0] for side in sides}
             raw_names = {_history_team_key(side[1]) for side in sides}
-            ids_match = has_target_ids and None not in raw_ids and raw_ids == target_ids
-            if not ids_match and raw_names != target_names:
+            ids_are_authoritative = has_target_ids and None not in raw_ids
+            if ids_are_authoritative:
+                if raw_ids != target_ids:
+                    continue
+            elif raw_names != target_names:
                 continue
             try:
                 normalized = normalize([raw_item], 1)
@@ -994,7 +1010,21 @@ def _should_fetch_published_lineups(
     kickoff = match.kickoff_at
     if kickoff.tzinfo is None:
         kickoff = kickoff.replace(tzinfo=timezone.utc)
-    return kickoff - current <= timedelta(minutes=60)
+    time_to_kickoff = kickoff - current
+    return timedelta(hours=-4) <= time_to_kickoff <= timedelta(minutes=60)
+
+
+def _api_coverage_flag(raw: object, *path: str) -> bool | None:
+    """Read one API-Football coverage flag without assuming it is present."""
+
+    current = raw
+    if isinstance(current, dict) and "coverage" in current:
+        current = current.get("coverage")
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current if isinstance(current, bool) else None
 
 
 def _apply_verified_market_odds(
@@ -1239,6 +1269,23 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
     away_recent_matches: list[H2HMatchItem] = []
     odds_quotes: dict[str, BookmakerQuote] = {}
     discipline: DisciplineSummary | None = None
+    league_coverage: dict | None = None
+    standings_payload: dict | None = None
+    home_team_statistics: dict | None = None
+    away_team_statistics: dict | None = None
+    provider_prediction: dict | None = None
+    home_player_statistics: dict | None = None
+    away_player_statistics: dict | None = None
+    top_scorers: list[dict] = []
+    top_assists: list[dict] = []
+    top_yellow_cards: list[dict] = []
+    top_red_cards: list[dict] = []
+    injuries_failed = False
+    lineups_failed = False
+    odds_failed = False
+    prediction_failed = False
+    lineups_requested = False
+    provider_unavailable_reason: str | None = None
     h2h_failed = False
     home_failed = False
     away_failed = False
@@ -1250,8 +1297,83 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
     )
     if isinstance(provider, APIFootballProvider) and match.id.startswith("api-football-"):
         fixture_id = match.external_id or match.id.replace("api-football-", "")
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            injuries_future = executor.submit(provider.get_fixture_injuries, fixture_id)
+        # `/status` is documented as quota-free. Refresh it only while the
+        # provider has no known daily allowance so a depleted account does not
+        # trigger a fan-out of doomed requests.
+        try:
+            if provider.quota_snapshot.get("remaining") is None:
+                provider.get_status()
+        except Exception as exc:
+            logger.info("No se pudo leer el estado de cuota de API-Football: %s", exc)
+
+        remaining = provider.quota_snapshot.get("remaining")
+        core_fetch_allowed = not isinstance(remaining, int) or remaining > 0
+        if isinstance(remaining, int) and remaining <= 0:
+            provider_unavailable_reason = (
+                "Cuota diaria de API-Football agotada; el bloque se reintentará tras el reinicio de cuota."
+            )
+        reserve = settings.api_football_optional_quota_reserve
+        optional_allowed = core_fetch_allowed and provider.can_fetch_optional(reserve=reserve)
+
+        if optional_allowed and match.league_id and match.season:
+            try:
+                league_coverage = provider.get_league_coverage(match.league_id, match.season)
+            except Exception as exc:
+                logger.warning("Cobertura de liga no disponible: %s", exc)
+            optional_allowed = provider.can_fetch_optional(reserve=reserve)
+
+        remaining_after_coverage = provider.quota_snapshot.get("remaining")
+        core_request_budget = (
+            remaining_after_coverage if isinstance(remaining_after_coverage, int) else 10
+        )
+        h2h_request_allowed = core_fetch_allowed and core_request_budget >= 1
+        history_bundle_allowed = core_fetch_allowed and core_request_budget >= 4
+        odds_request_allowed = core_fetch_allowed and core_request_budget >= 5
+        injuries_request_allowed = core_fetch_allowed and core_request_budget >= 6
+        lineup_request_allowed = core_fetch_allowed and core_request_budget >= 7
+        if core_fetch_allowed and core_request_budget < 6:
+            provider_unavailable_reason = (
+                "Cuota restante insuficiente para consultar todos los bloques sin agotar la reserva."
+            )
+
+        quota_limit = provider.quota_snapshot.get("limit")
+        mode = settings.api_football_enrichment_mode
+        full_enrichment = (
+            optional_allowed
+            and (
+                not isinstance(remaining_after_coverage, int)
+                or remaining_after_coverage >= reserve + 10
+            )
+            and (
+                mode == "full"
+                or (mode == "auto" and isinstance(quota_limit, int) and quota_limit > 100)
+            )
+        )
+        player_enrichment = full_enrichment and (
+            not isinstance(remaining_after_coverage, int)
+            or remaining_after_coverage >= reserve + 12
+        )
+        rankings_enrichment = full_enrichment and (
+            not isinstance(remaining_after_coverage, int)
+            or remaining_after_coverage >= reserve + 16
+        )
+
+        lineups_requested = (
+            lineup_request_allowed
+            and _should_fetch_published_lineups(match)
+            and _api_coverage_flag(league_coverage, "fixtures", "lineups") is not False
+        )
+        injuries_supported = _api_coverage_flag(league_coverage, "injuries") is not False
+        odds_supported = _api_coverage_flag(league_coverage, "odds") is not False
+        predictions_supported = _api_coverage_flag(league_coverage, "predictions") is not False
+        standings_supported = _api_coverage_flag(league_coverage, "standings") is not False
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            injuries_future = (
+                executor.submit(provider.get_fixture_injuries, fixture_id)
+                if injuries_request_allowed and injuries_supported
+                else None
+            )
             lineups_future = (
                 executor.submit(
                     provider.get_fixture_lineups,
@@ -1259,25 +1381,148 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
                     match.home_team_id,
                     match.away_team_id,
                 )
-                if _should_fetch_published_lineups(match)
+                if lineups_requested
                 else None
             )
-            odds_future = executor.submit(provider.get_fixture_odds, fixture_id)
+            odds_future = (
+                executor.submit(provider.get_fixture_odds, fixture_id)
+                if odds_request_allowed and odds_supported
+                else None
+            )
             h2h_future = None
             home_future = None
             away_future = None
-            if match.home_team_id and match.away_team_id:
+            if h2h_request_allowed and match.home_team_id and match.away_team_id:
                 h2h_future = executor.submit(provider.get_head_to_head, match.home_team_id, match.away_team_id, 10)
+            if history_bundle_allowed and match.home_team_id and match.away_team_id:
                 home_future = executor.submit(provider.get_team_last_matches, match.home_team_id, 10, False)
                 away_future = executor.submit(provider.get_team_last_matches, match.away_team_id, 10, False)
 
-            injuries = _future_value(injuries_future, [])
-            lineups = _future_value(lineups_future, None)
+            standings_future = (
+                executor.submit(provider.get_standings, match.league_id, match.season)
+                if full_enrichment and standings_supported and match.league_id and match.season
+                else None
+            )
+            home_stats_future = (
+                executor.submit(
+                    provider.get_team_statistics,
+                    match.home_team_id,
+                    match.league_id,
+                    match.season,
+                    through_date=match.kickoff_at.astimezone(SPORTS_TIMEZONE).date(),
+                )
+                if full_enrichment and match.home_team_id and match.league_id and match.season
+                else None
+            )
+            away_stats_future = (
+                executor.submit(
+                    provider.get_team_statistics,
+                    match.away_team_id,
+                    match.league_id,
+                    match.season,
+                    through_date=match.kickoff_at.astimezone(SPORTS_TIMEZONE).date(),
+                )
+                if full_enrichment and match.away_team_id and match.league_id and match.season
+                else None
+            )
+            prediction_future = (
+                executor.submit(provider.get_prediction, fixture_id)
+                if full_enrichment and predictions_supported
+                else None
+            )
+            players_supported = _api_coverage_flag(league_coverage, "players") is not False
+            home_players_future = (
+                executor.submit(
+                    provider.get_player_context,
+                    match.home_team_id,
+                    match.league_id,
+                    match.season,
+                )
+                if player_enrichment
+                and players_supported
+                and match.home_team_id
+                and match.league_id
+                and match.season
+                else None
+            )
+            away_players_future = (
+                executor.submit(
+                    provider.get_player_context,
+                    match.away_team_id,
+                    match.league_id,
+                    match.season,
+                )
+                if player_enrichment
+                and players_supported
+                and match.away_team_id
+                and match.league_id
+                and match.season
+                else None
+            )
+            top_scorers_future = (
+                executor.submit(provider.get_top_scorers, match.league_id, match.season)
+                if rankings_enrichment
+                and _api_coverage_flag(league_coverage, "top_scorers") is not False
+                and match.league_id
+                and match.season
+                else None
+            )
+            top_assists_future = (
+                executor.submit(provider.get_top_assists, match.league_id, match.season)
+                if rankings_enrichment
+                and _api_coverage_flag(league_coverage, "top_assists") is not False
+                and match.league_id
+                and match.season
+                else None
+            )
+            top_yellow_future = (
+                executor.submit(provider.get_top_yellow_cards, match.league_id, match.season)
+                if rankings_enrichment
+                and _api_coverage_flag(league_coverage, "top_cards") is not False
+                and match.league_id
+                and match.season
+                else None
+            )
+            top_red_future = (
+                executor.submit(provider.get_top_red_cards, match.league_id, match.season)
+                if rankings_enrichment
+                and _api_coverage_flag(league_coverage, "top_cards") is not False
+                and match.league_id
+                and match.season
+                else None
+            )
+
+            injuries_result, injuries_failed = _future_result(injuries_future, [])
+            injuries = injuries_result if isinstance(injuries_result, list) else []
+            lineups, lineups_failed = _future_result(lineups_future, None)
             h2h_matches, h2h_failed = _history_future_value(h2h_future)
             home_history, home_failed = _history_future_value(home_future)
             away_history, away_failed = _history_future_value(away_future)
-            history_fetch_failed = h2h_failed or home_failed or away_failed
-            odds_quotes = _future_value(odds_future, {})
+            history_fetch_failed = (
+                not history_bundle_allowed or h2h_failed or home_failed or away_failed
+            )
+            odds_result, odds_failed = _future_result(odds_future, {})
+            odds_quotes = odds_result if isinstance(odds_result, dict) else {}
+            standings_result, _ = _future_result(standings_future, None)
+            standings_payload = standings_result if isinstance(standings_result, dict) else None
+            home_stats_result, _ = _future_result(home_stats_future, None)
+            home_team_statistics = home_stats_result if isinstance(home_stats_result, dict) else None
+            away_stats_result, _ = _future_result(away_stats_future, None)
+            away_team_statistics = away_stats_result if isinstance(away_stats_result, dict) else None
+            prediction_result, prediction_failed = _future_result(prediction_future, None)
+            provider_prediction = prediction_result if isinstance(prediction_result, dict) else None
+            home_players_result, _ = _future_result(home_players_future, None)
+            home_player_statistics = home_players_result if isinstance(home_players_result, dict) else None
+            away_players_result, _ = _future_result(away_players_future, None)
+            away_player_statistics = away_players_result if isinstance(away_players_result, dict) else None
+            top_scorers_result, _ = _future_result(top_scorers_future, [])
+            top_scorers = top_scorers_result if isinstance(top_scorers_result, list) else []
+            top_assists_result, _ = _future_result(top_assists_future, [])
+            top_assists = top_assists_result if isinstance(top_assists_result, list) else []
+            top_yellow_result, _ = _future_result(top_yellow_future, [])
+            top_yellow_cards = top_yellow_result if isinstance(top_yellow_result, list) else []
+            top_red_result, _ = _future_result(top_red_future, [])
+            top_red_cards = top_red_result if isinstance(top_red_result, list) else []
             home_history, away_history = provider.enrich_fixture_histories(
                 home_history,
                 away_history,
@@ -1383,6 +1628,43 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
             tendency="Sin métricas arbitrales verificadas",
         )
 
+    evidence = None
+    if isinstance(provider, APIFootballProvider) and match.id.startswith("api-football-"):
+        evidence = build_match_evidence(
+            match=match,
+            provider_name=provider.provider_name,
+            home_history=home_history,
+            away_history=away_history,
+            h2h=h2h_matches,
+            injuries=injuries,
+            lineups=lineups,
+            odds_quotes=odds_quotes,
+            league_coverage=league_coverage,
+            standings=standings_payload,
+            home_team_statistics=home_team_statistics,
+            away_team_statistics=away_team_statistics,
+            provider_prediction=provider_prediction,
+            home_player_statistics=home_player_statistics,
+            away_player_statistics=away_player_statistics,
+            top_scorers=top_scorers,
+            top_assists=top_assists,
+            top_yellow_cards=top_yellow_cards,
+            top_red_cards=top_red_cards,
+            h2h_failed=h2h_failed,
+            home_history_failed=home_failed,
+            away_history_failed=away_failed,
+            injuries_failed=injuries_failed,
+            lineups_requested=lineups_requested,
+            lineups_failed=lineups_failed,
+            odds_failed=odds_failed,
+            prediction_failed=prediction_failed,
+            standings_requested=bool(
+                full_enrichment and standings_supported and match.league_id and match.season
+            ),
+            prediction_requested=bool(full_enrichment and predictions_supported),
+            provider_unavailable_reason=provider_unavailable_reason,
+        )
+
     analysis = analyze_match_with_ai(
         match=match,
         referee_info=referee_info,
@@ -1391,6 +1673,7 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
         h2h_matches=h2h_matches,
         home_last_matches=home_history,
         away_last_matches=away_history,
+        evidence=evidence,
         # Sports-provider latency no longer disables the requested four-model
         # interpretation. The frontend has a dedicated analysis deadline and
         # the AI calls share one bounded parallel window.

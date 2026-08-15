@@ -99,6 +99,8 @@ API_FOOTBALL_KEY=tu_api_sports_key_aqui
 API_FOOTBALL_BASE_URL=https://v3.football.api-sports.io
 API_FOOTBALL_IS_RAPIDAPI=false
 API_FOOTBALL_TIMEOUT_SECONDS=10
+API_FOOTBALL_ENRICHMENT_MODE=auto
+API_FOOTBALL_OPTIONAL_QUOTA_RESERVE=15
 
 # Segundo proveedor: Sportmonks Football API v3
 SPORTMONKS_API_TOKEN=tu_token_sportmonks
@@ -157,6 +159,53 @@ permite desplegar los cinco anteriores sin una segunda espera.
 En el detalle se consulta `odds?fixture=...` y solo se aplican cotizaciones que
 coinciden exactamente con mercado, selección, línea y periodo; las combinadas
 generadas conservan su cuota justa y nunca multiplican precios individuales.
+
+### Evidencia API-Football utilizada por el motor
+
+El adaptador API-Football cubre el catálogo documentado completo: estado y
+cuota; zonas horarias, países, ligas y temporadas; equipos, sedes, jornadas y
+clasificación; fixtures, H2H, estadísticas, eventos, alineaciones y rendimiento
+de jugadores; lesiones y `predictions`; entrenadores, plantillas, transferencias,
+trofeos y periodos de baja; rankings de goleadores, asistencias y tarjetas; y los
+catálogos/cotizaciones live y prepartido (`mapping`, bookmakers y bets).
+
+No todos esos endpoints se convierten automáticamente en una variable
+predictiva. País, zona horaria, trofeos o una imagen de sede son contexto; no se
+presentan a la IA como si aumentaran por sí solos la probabilidad de ganar. El
+análisis prepartido sí normaliza y contrasta:
+
+- forma, H2H y marcadores de hasta diez partidos terminados;
+- goles a favor/en contra, victorias/empates/derrotas, porterías a cero y
+  partidos sin anotar;
+- córners, remates, remates al arco, faltas y tarjetas con tamaño de muestra;
+- posición, puntos, diferencia de gol y forma de la clasificación;
+- minutos, titularidades, rating, goles, asistencias, remates, pases clave,
+  recuperaciones y tarjetas de jugadores;
+- bajas, dudas, sanciones y alineaciones confirmadas o probables;
+- `predictions` de API-Football como señal secundaria identificada, nunca como
+  verdad ni como cuota de bookmaker;
+- cotizaciones que coincidan exactamente con mercado, selección y línea.
+
+Cada bloque responde con `available`, `partial`, `unavailable` o
+`not_requested`, más proveedor, endpoint, fecha y tamaño de muestra. Las cuatro
+IAs reciben el mismo resumen estructurado y sólo pueden proponer familias de
+mercado respaldadas por evidencia. Primero estiman probabilidad y cuota justa;
+después el backend superpone la cuota verificada y calcula EV. El número real de
+IAs que respondió se expone en `ai_consensus`; nunca se informa consenso de
+cuatro si participaron menos proveedores.
+
+`API_FOOTBALL_ENRICHMENT_MODE=auto` protege la cuota Free: conserva H2H, forma
+enriquecida, estadísticas recientes de equipos/jugadores, bajas y odds, y activa
+automáticamente standings, estadísticas completas de temporada, predictions y
+rankings cuando el plan tiene una cuota amplia. `full` fuerza todo el contexto
+opcional y `quota-saving` conserva siempre el perfil básico. El umbral que debe
+quedar libre se configura con `API_FOOTBALL_OPTIONAL_QUOTA_RESERVE`.
+
+Las cuotas live y sus IDs de bets se mantienen aislados del motor prepartido;
+API-Football documenta catálogos diferentes y no conserva historial live. Los
+datos históricos terminados usan cachés largas, mientras injuries, lineups,
+predictions y odds respetan sus cadencias documentadas y un cooldown evita
+repetir llamadas tras 401, 403, 429 o cuota agotada.
 
 El navegador concede 65 segundos a agenda/recomendaciones y 90 segundos al
 detalle analítico. El backend usa 10 s para API-Football, 15 s para Sportmonks,

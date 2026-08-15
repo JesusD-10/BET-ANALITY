@@ -86,6 +86,13 @@ class Settings(BaseSettings):
 
     api_football_timeout_seconds: int = 10
 
+    # `auto` usa el contexto completo en planes con cuota amplia y conserva el
+    # plan Free para H2H, forma enriquecida, bajas y cuotas. `full` fuerza todos
+    # los bloques opcionales; `quota-saving` conserva siempre el perfil básico.
+    api_football_enrichment_mode: str = "auto"
+
+    api_football_optional_quota_reserve: int = 15
+
 
     # Sportmonks Football API v3
     sportmonks_api_token: str = ""
@@ -147,6 +154,25 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             parsed = 3
         return max(1, min(parsed, 4))
+
+    @field_validator("api_football_enrichment_mode", mode="before")
+    @classmethod
+    def validate_api_football_enrichment_mode(cls, value: object) -> str:
+        normalized = str(value or "auto").strip().casefold()
+        if normalized not in {"auto", "full", "quota-saving"}:
+            raise ValueError(
+                "API_FOOTBALL_ENRICHMENT_MODE debe ser auto, full o quota-saving"
+            )
+        return normalized
+
+    @field_validator("api_football_optional_quota_reserve", mode="before")
+    @classmethod
+    def clamp_api_football_quota_reserve(cls, value: object) -> int:
+        try:
+            parsed = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            parsed = 15
+        return max(0, min(parsed, 1000))
 
     @model_validator(mode="after")
     def preserve_all_sports_provider_attempts(self) -> Self:

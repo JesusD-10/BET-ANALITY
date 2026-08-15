@@ -129,6 +129,160 @@ export type DisciplineSummary = {
   note: string;
 };
 
+export type DataAvailability = {
+  status: "available" | "partial" | "unavailable" | "not_requested" | "not_applicable" | string;
+  reason?: string | null;
+  sample_size?: number | null;
+};
+
+export type DataProvenance = {
+  provider: string;
+  endpoint?: string | null;
+  fetched_at?: string | null;
+  verified: boolean;
+};
+
+export type EvidenceCoverageItem = DataAvailability & {
+  section:
+    | "team_statistics"
+    | "standings"
+    | "h2h"
+    | "recent_fixtures"
+    | "players"
+    | "injuries"
+    | "lineups"
+    | "provider_prediction"
+    | "verified_odds"
+    | string;
+  provenance: DataProvenance[];
+};
+
+export type TeamStatisticsSnapshot = {
+  team_id?: string | null;
+  team_name: string;
+  form?: string | null;
+  fixtures_played?: number | null;
+  wins?: number | null;
+  draws?: number | null;
+  losses?: number | null;
+  goals_for?: number | null;
+  goals_against?: number | null;
+  goals_for_avg?: number | null;
+  goals_against_avg?: number | null;
+  clean_sheets?: number | null;
+  failed_to_score?: number | null;
+  averages: Record<string, number | null>;
+  rates: Record<string, number | null>;
+};
+
+export type FixtureStatisticsSnapshot = {
+  fixture_id: string;
+  date?: string | null;
+  competition?: string | null;
+  home_team: string;
+  away_team: string;
+  home_goals?: number | null;
+  away_goals?: number | null;
+  home_statistics: Record<string, number | null>;
+  away_statistics: Record<string, number | null>;
+};
+
+export type MatchStatisticsSummary = {
+  home?: TeamStatisticsSnapshot | null;
+  away?: TeamStatisticsSnapshot | null;
+  home_recent_fixtures: FixtureStatisticsSnapshot[];
+  away_recent_fixtures: FixtureStatisticsSnapshot[];
+};
+
+export type StandingSnapshot = {
+  team_id?: string | null;
+  team_name: string;
+  rank?: number | null;
+  points?: number | null;
+  played?: number | null;
+  wins?: number | null;
+  draws?: number | null;
+  losses?: number | null;
+  goals_for?: number | null;
+  goals_against?: number | null;
+  goal_difference?: number | null;
+  form?: string | null;
+  description?: string | null;
+};
+
+export type StandingsContext = {
+  league_id?: string | null;
+  season?: number | null;
+  round?: string | null;
+  venue_id?: string | null;
+  home?: StandingSnapshot | null;
+  away?: StandingSnapshot | null;
+};
+
+export type PlayerStatisticsSnapshot = {
+  player_id?: string | null;
+  player_name: string;
+  team_id?: string | null;
+  team_name?: string | null;
+  position?: string | null;
+  appearances?: number | null;
+  starts?: number | null;
+  minutes?: number | null;
+  rating?: number | null;
+  goals?: number | null;
+  assists?: number | null;
+  shots?: number | null;
+  shots_on_target?: number | null;
+  key_passes?: number | null;
+  tackles?: number | null;
+  interceptions?: number | null;
+  saves?: number | null;
+  yellow_cards?: number | null;
+  red_cards?: number | null;
+};
+
+export type PlayerContext = {
+  home: PlayerStatisticsSnapshot[];
+  away: PlayerStatisticsSnapshot[];
+  top_scorers: PlayerStatisticsSnapshot[];
+  top_assists: PlayerStatisticsSnapshot[];
+  top_yellow_cards: PlayerStatisticsSnapshot[];
+  top_red_cards: PlayerStatisticsSnapshot[];
+};
+
+export type ProviderPredictionEvidence = {
+  winner_id?: string | null;
+  winner_name?: string | null;
+  winner_comment?: string | null;
+  advice?: string | null;
+  win_or_draw?: boolean | null;
+  under_over?: string | null;
+  goals_home?: string | null;
+  goals_away?: string | null;
+  percent_home?: number | null;
+  percent_draw?: number | null;
+  percent_away?: number | null;
+};
+
+export type VerifiedOddsEvidence = {
+  market_key: string;
+  selection: string;
+  odds: number;
+  bookmaker: string;
+  captured_at?: string | null;
+  live: boolean;
+  provenance: DataProvenance;
+};
+
+export type AIConsensusSummary = {
+  requested: number;
+  completed: number;
+  providers: string[];
+  required_support: number;
+  status: "consensus" | "partial" | "single" | "unavailable" | "fallback" | string;
+  reason?: string | null;
+};
+
 export type LineupsSummary = {
   confirmed: boolean;
   home?: TeamLineup | null;
@@ -154,6 +308,8 @@ export type Match = {
   away_team: string;
   home_team_id?: string | null;
   away_team_id?: string | null;
+  league_id?: string | null;
+  season?: number | null;
   home_logo?: string | null;
   away_logo?: string | null;
   venue?: string | null;
@@ -164,6 +320,8 @@ export type Match = {
   odds_available: boolean;
   status: string;
   source_provider?: string;
+  source_url?: string | null;
+  external_id?: string | null;
 };
 
 export type Market = {
@@ -179,6 +337,7 @@ export type Market = {
   data_quality: number;
   factors_for: string[];
   risks: string[];
+  evidence_refs?: string[];
 };
 
 export type CombinationLeg = {
@@ -215,6 +374,13 @@ export type Analysis = {
   h2h_matches: H2HMatch[];
   home_recent_matches: H2HMatch[];
   away_recent_matches: H2HMatch[];
+  data_coverage?: EvidenceCoverageItem[];
+  statistics_summary?: MatchStatisticsSummary | null;
+  standings?: StandingsContext | null;
+  provider_prediction?: ProviderPredictionEvidence | null;
+  player_context?: PlayerContext | null;
+  verified_odds?: VerifiedOddsEvidence[];
+  ai_consensus?: AIConsensusSummary | null;
   tactical_summary?: string | null;
   injuries_impact?: string | null;
   referee_impact?: string | null;

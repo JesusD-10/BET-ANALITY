@@ -23,7 +23,37 @@ SPORTS_TIMEZONE = ZoneInfo("America/Lima")
 
 
 class APIFootballAPIError(RuntimeError):
-    """Error declarado por API-Football sin exponer el contenido de la respuesta."""
+    """Error seguro del proveedor, serializable sin filtrar datos sensibles."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        endpoint: str | None = None,
+        code: str = "provider_error",
+        retryable: bool = False,
+        status_code: int | None = None,
+        cooldown_seconds: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.endpoint = endpoint
+        self.code = code
+        self.retryable = retryable
+        self.status_code = status_code
+        self.cooldown_seconds = max(0, cooldown_seconds)
+
+    def as_envelope(self) -> dict[str, object]:
+        """Return a public error envelope; the upstream message is never included."""
+
+        return {
+            "provider": APIFootballProvider.provider_name,
+            "endpoint": self.endpoint,
+            "code": self.code,
+            "message": str(self),
+            "retryable": self.retryable,
+            "status_code": self.status_code,
+            "cooldown_seconds": self.cooldown_seconds,
+        }
 
 
 @dataclass(frozen=True)
@@ -41,12 +71,139 @@ class APIFootballProvider:
     _ODDS_CACHE_TTL_SECONDS = 3 * 60 * 60
     _ODDS_EMPTY_CACHE_TTL_SECONDS = 15 * 60
 
+    # Static catalogues are intentionally long-lived. Match-dependent data is
+    # short-lived so it can be refreshed without repeatedly spending quota.
+    _CACHE_TTLS: dict[str, int] = {
+        "status": 60,
+        "timezone": 7 * 24 * 60 * 60,
+        "countries": 7 * 24 * 60 * 60,
+        "leagues": 6 * 60 * 60,
+        "venues": 24 * 60 * 60,
+        "fixtures/rounds": 6 * 60 * 60,
+        "standings": 30 * 60,
+        "teams": 24 * 60 * 60,
+        "teams/statistics": 6 * 60 * 60,
+        "fixtures": 10 * 60,
+        "fixtures/headtohead": 6 * 60 * 60,
+        "fixtures/statistics": 60 * 60,
+        "fixtures/events": 60 * 60,
+        "fixtures/lineups": 10 * 60,
+        "fixtures/players": 60 * 60,
+        "injuries": 10 * 60,
+        "predictions": 6 * 60 * 60,
+        "players": 6 * 60 * 60,
+        "players/squads": 6 * 60 * 60,
+        "players/topscorers": 6 * 60 * 60,
+        "players/topassists": 6 * 60 * 60,
+        "players/topyellowcards": 6 * 60 * 60,
+        "players/topredcards": 6 * 60 * 60,
+        "transfers": 6 * 60 * 60,
+        "trophies": 24 * 60 * 60,
+        "sidelined": 6 * 60 * 60,
+        "coachs": 24 * 60 * 60,
+        "odds/mapping": 24 * 60 * 60,
+        "odds/bookmakers": 24 * 60 * 60,
+        "odds/bets": 24 * 60 * 60,
+        "odds/live/bets": 24 * 60 * 60,
+    }
+
     def __init__(self, key: str, base_url: str = "https://v3.football.api-sports.io", is_rapidapi: bool = False, timeout: int = 3) -> None:
         self.key = key
         self.base_url = base_url.rstrip("/")
         self.is_rapidapi = is_rapidapi
         self.timeout = timeout
         self._odds_cache: dict[str, tuple[float, dict[str, BookmakerQuote]]] = {}
+        self._response_cache: dict[str, tuple[float, dict]] = {}
+        self._error_cache: dict[str, tuple[float, APIFootballAPIError]] = {}
+        self._provider_cooldown_until = 0.0
+        self._quota_remaining: int | None = None
+        self._quota_limit: int | None = None
+        self._quota_captured_at: str | None = None
+
+    @staticmethod
+    def _request_key(endpoint: str, params: dict | None = None) -> str:
+        normalized = tuple(
+            sorted(
+                (str(key), str(value))
+                for key, value in (params or {}).items()
+                if value is not None
+            )
+        )
+        return f"{endpoint.lstrip('/')}|{normalized!r}"
+
+    @staticmethod
+    def _header_int(headers: object, name: str) -> int | None:
+        try:
+            value = headers.get(name)  # type: ignore[union-attr]
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                return None
+            return int(value)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _capture_quota(self, headers: object) -> None:
+        remaining = self._header_int(headers, "x-ratelimit-requests-remaining")
+        limit = self._header_int(headers, "x-ratelimit-requests-limit")
+        if remaining is not None:
+            self._quota_remaining = max(0, remaining)
+        if limit is not None:
+            self._quota_limit = max(0, limit)
+        if remaining is not None or limit is not None:
+            self._quota_captured_at = datetime.now(timezone.utc).isoformat()
+
+    @property
+    def quota_snapshot(self) -> dict[str, object]:
+        cooldown_remaining = max(0, math.ceil(self._provider_cooldown_until - time.monotonic()))
+        return {
+            "remaining": self._quota_remaining,
+            "limit": self._quota_limit,
+            "captured_at": self._quota_captured_at,
+            "cooldown_seconds": cooldown_remaining,
+        }
+
+    def can_fetch_optional(self, reserve: int = 10) -> bool:
+        """Tell the orchestrator whether non-essential enrichment is affordable."""
+
+        if time.monotonic() < self._provider_cooldown_until:
+            return False
+        return self._quota_remaining is None or self._quota_remaining > max(0, reserve)
+
+    def _remember_error(self, key: str, error: APIFootballAPIError) -> None:
+        if error.cooldown_seconds <= 0:
+            return
+        expires_at = time.monotonic() + error.cooldown_seconds
+        self._error_cache[key] = (expires_at, error)
+        if error.code in {"rate_limited", "quota_exhausted", "authentication_error"}:
+            self._provider_cooldown_until = max(self._provider_cooldown_until, expires_at)
+
+    def _cached_request(
+        self,
+        endpoint: str,
+        params: dict | None = None,
+        *,
+        ttl: int | None = None,
+        timeout: float | None = None,
+    ) -> dict:
+        """Cache one provider envelope and return defensive copies to callers."""
+
+        clean_params = {key: value for key, value in (params or {}).items() if value is not None}
+        key = self._request_key(endpoint, clean_params)
+        cached = self._response_cache.get(key)
+        effective_ttl = self._CACHE_TTLS.get(endpoint.lstrip("/"), 5 * 60) if ttl is None else max(0, ttl)
+        if cached is not None and time.monotonic() - cached[0] <= effective_ttl:
+            return deepcopy(cached[1])
+
+        try:
+            payload = (
+                self._request(endpoint, clean_params)
+                if timeout is None
+                else self._request(endpoint, clean_params, timeout=timeout)
+            )
+        except APIFootballAPIError as exc:
+            self._remember_error(key, exc)
+            raise
+        self._response_cache[key] = (time.monotonic(), deepcopy(payload))
+        return deepcopy(payload)
 
     def _get_headers(self) -> dict[str, str]:
         if self.is_rapidapi:
@@ -65,7 +222,26 @@ class APIFootballProvider:
         *,
         timeout: float | None = None,
     ) -> dict:
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        clean_endpoint = endpoint.lstrip("/")
+        request_key = self._request_key(clean_endpoint, params)
+        now = time.monotonic()
+        cached_error = self._error_cache.get(request_key)
+        if cached_error is not None:
+            if now < cached_error[0]:
+                raise cached_error[1]
+            self._error_cache.pop(request_key, None)
+
+        if clean_endpoint != "status" and now < self._provider_cooldown_until:
+            remaining = max(1, math.ceil(self._provider_cooldown_until - now))
+            raise APIFootballAPIError(
+                "API-Football está temporalmente en espera para proteger la cuota.",
+                endpoint=clean_endpoint,
+                code="provider_cooldown",
+                retryable=True,
+                cooldown_seconds=remaining,
+            )
+
+        url = f"{self.base_url}/{clean_endpoint}"
         try:
             response = httpx.get(
                 url,
@@ -74,29 +250,113 @@ class APIFootballProvider:
                 timeout=self.timeout if timeout is None else max(0.1, timeout),
             )
             response.raise_for_status()
+            self._capture_quota(getattr(response, "headers", {}))
             if response.status_code == 204:
                 return {"errors": [], "results": 0, "response": []}
             data = response.json()
-        except Exception as err:
-            logger.error("Error al consultar API-Football en %s: %s", url, err)
-            raise
+        except httpx.HTTPStatusError as err:
+            status_code = err.response.status_code
+            self._capture_quota(err.response.headers)
+            retry_after = self._header_int(err.response.headers, "retry-after")
+            if status_code == 429:
+                code, retryable, cooldown = "rate_limited", True, retry_after or 60
+            elif status_code in {401, 403}:
+                code, retryable, cooldown = "authentication_error", False, 15 * 60
+            elif status_code >= 500:
+                code, retryable, cooldown = "upstream_unavailable", True, 15
+            else:
+                code, retryable, cooldown = "http_error", False, 0
+            safe_error = APIFootballAPIError(
+                "No se pudo completar la consulta a API-Football.",
+                endpoint=clean_endpoint,
+                code=code,
+                retryable=retryable,
+                status_code=status_code,
+                cooldown_seconds=cooldown,
+            )
+            self._remember_error(request_key, safe_error)
+            logger.warning("API-Football respondió HTTP %s en %s.", status_code, clean_endpoint)
+            raise safe_error from err
+        except httpx.TimeoutException as err:
+            safe_error = APIFootballAPIError(
+                "API-Football no respondió dentro del tiempo esperado.",
+                endpoint=clean_endpoint,
+                code="timeout",
+                retryable=True,
+                cooldown_seconds=5,
+            )
+            self._remember_error(request_key, safe_error)
+            raise safe_error from err
+        except httpx.HTTPError as err:
+            safe_error = APIFootballAPIError(
+                "No se pudo conectar con API-Football.",
+                endpoint=clean_endpoint,
+                code="network_error",
+                retryable=True,
+                cooldown_seconds=10,
+            )
+            self._remember_error(request_key, safe_error)
+            raise safe_error from err
+        except (TypeError, ValueError) as err:
+            raise APIFootballAPIError(
+                "API-Football devolvió una respuesta que no se pudo interpretar.",
+                endpoint=clean_endpoint,
+                code="invalid_json",
+            ) from err
 
         if not isinstance(data, dict):
-            raise APIFootballAPIError("API-Football devolvió una respuesta con formato inesperado.")
+            raise APIFootballAPIError(
+                "API-Football devolvió una respuesta con formato inesperado.",
+                endpoint=clean_endpoint,
+                code="invalid_envelope",
+            )
 
         errors = data.get("errors")
         if errors:
             error_count = len(errors) if isinstance(errors, (dict, list, tuple, set)) else 1
+            error_text = str(errors).casefold()
+            quota_error = any(term in error_text for term in ("rate limit", "request limit", "quota"))
+            auth_error = any(term in error_text for term in ("token", "api key", "apikey", "subscription"))
+            code = "quota_exhausted" if quota_error else "authentication_error" if auth_error else "provider_rejected"
+            cooldown = 5 * 60 if quota_error else 15 * 60 if auth_error else 0
             logger.warning(
                 "API-Football rechazó la solicitud al endpoint %s con %s error(es).",
-                endpoint,
+                clean_endpoint,
                 error_count,
             )
-            raise APIFootballAPIError(
-                f"API-Football rechazó la solicitud con {error_count} error(es)."
+            safe_error = APIFootballAPIError(
+                f"API-Football rechazó la solicitud con {error_count} error(es).",
+                endpoint=clean_endpoint,
+                code=code,
+                retryable=quota_error,
+                cooldown_seconds=cooldown,
             )
+            self._remember_error(request_key, safe_error)
+            raise safe_error
 
         return data
+
+    @staticmethod
+    def _response_items(data: dict, endpoint: str) -> list[dict]:
+        response = data.get("response")
+        if not isinstance(response, list):
+            raise APIFootballAPIError(
+                "API-Football devolvió una lista de datos con formato inesperado.",
+                endpoint=endpoint,
+                code="invalid_envelope",
+            )
+        return [deepcopy(item) for item in response if isinstance(item, dict)]
+
+    @staticmethod
+    def _response_object(data: dict, endpoint: str) -> dict:
+        response = data.get("response")
+        if not isinstance(response, dict):
+            raise APIFootballAPIError(
+                "API-Football devolvió un objeto de datos con formato inesperado.",
+                endpoint=endpoint,
+                code="invalid_envelope",
+            )
+        return deepcopy(response)
 
     def _to_match_summary(self, item: dict) -> MatchSummary:
         fixture = item.get("fixture") or {}
@@ -123,6 +383,9 @@ class APIFootballProvider:
             id=f"api-football-{fixture_id}",
             external_id=fixture_id,
             competition=league.get("name") or "Competición",
+            league_id=str(league["id"]) if league.get("id") is not None else None,
+            season=league.get("season"),
+            round=str(league.get("round")) if league.get("round") is not None else None,
             kickoff_at=kickoff,
             home_team=home.get("name") or "Local",
             away_team=away.get("name") or "Visitante",
@@ -130,6 +393,11 @@ class APIFootballProvider:
             away_team_id=away_team_id,
             home_logo=home.get("logo"),
             away_logo=away.get("logo"),
+            venue_id=(
+                str((fixture.get("venue") or {})["id"])
+                if (fixture.get("venue") or {}).get("id") is not None
+                else None
+            ),
             venue=(fixture.get("venue") or {}).get("name"),
             referee=fixture.get("referee"),
             data_quality=0.95,
@@ -148,9 +416,10 @@ class APIFootballProvider:
         timeout: float | None = None,
     ) -> list[MatchSummary]:
         target_date = (match_date or datetime.now(SPORTS_TIMEZONE).date()).isoformat()
-        data = self._request(
+        data = self._cached_request(
             "fixtures",
             params={"date": target_date, "timezone": SPORTS_TIMEZONE.key},
+            ttl=60,
             timeout=timeout,
         )
         response_items = data.get("response")
@@ -169,13 +438,950 @@ class APIFootballProvider:
 
     def get_fixture_details(self, fixture_id: str) -> dict | None:
         clean_id = fixture_id.removeprefix("api-football-")
-        data = self._request("fixtures", params={"id": clean_id})
+        data = self._cached_request("fixtures", params={"id": clean_id}, ttl=2 * 60)
         res = data.get("response")
         if not isinstance(res, list):
             raise APIFootballAPIError(
                 "API-Football devolvió un detalle de partido con formato inesperado."
             )
         return res[0] if res else None
+
+    @staticmethod
+    def _clean_id(value: object, label: str = "id") -> str:
+        clean = str(value or "").removeprefix("api-football-").strip()
+        if not clean.isdigit():
+            raise ValueError(f"{label} debe ser un identificador numérico de API-Football.")
+        return clean
+
+    @staticmethod
+    def _entity(raw: object) -> dict[str, object]:
+        if not isinstance(raw, dict):
+            return {}
+        entity = deepcopy(raw)
+        if entity.get("id") is not None:
+            entity["id"] = str(entity["id"])
+        return entity
+
+    @classmethod
+    def _split_record(cls, raw: object) -> dict[str, object] | None:
+        if not isinstance(raw, dict):
+            return None
+        result: dict[str, object] = {}
+        for key in ("home", "away", "total"):
+            if key in raw:
+                result[key] = cls._metric_value(raw.get(key))
+        return result
+
+    def get_status(self) -> dict:
+        """Return account/quota status. API-Sports documents this call as free."""
+
+        data = self._cached_request("status")
+        status = self._response_object(data, "status")
+        requests = status.get("requests") if isinstance(status.get("requests"), dict) else {}
+        try:
+            current = int(requests.get("current"))
+            limit_day = int(requests.get("limit_day"))
+        except (TypeError, ValueError):
+            pass
+        else:
+            self._quota_limit = max(0, limit_day)
+            self._quota_remaining = max(0, limit_day - max(0, current))
+            self._quota_captured_at = datetime.now(timezone.utc).isoformat()
+        return status
+
+    def get_timezones(self) -> list[str]:
+        data = self._cached_request("timezone")
+        response = data.get("response")
+        if not isinstance(response, list):
+            raise APIFootballAPIError(
+                "API-Football devolvió zonas horarias con formato inesperado.",
+                endpoint="timezone",
+                code="invalid_envelope",
+            )
+        return [str(item) for item in response if isinstance(item, str)]
+
+    def get_countries(self, *, name: str | None = None, code: str | None = None, search: str | None = None) -> list[dict]:
+        data = self._cached_request(
+            "countries",
+            params={"name": name, "code": code, "search": search},
+        )
+        return self._response_items(data, "countries")
+
+    def get_venues(
+        self,
+        *,
+        venue_id: str | int | None = None,
+        name: str | None = None,
+        city: str | None = None,
+        country: str | None = None,
+        search: str | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "venues",
+            params={
+                "id": self._clean_id(venue_id, "venue_id") if venue_id is not None else None,
+                "name": name,
+                "city": city,
+                "country": country,
+                "search": search,
+            },
+        )
+        return self._response_items(data, "venues")
+
+    def get_rounds(
+        self,
+        league_id: str | int,
+        season: int,
+        *,
+        current: bool | None = None,
+        include_dates: bool = False,
+    ) -> list[object]:
+        data = self._cached_request(
+            "fixtures/rounds",
+            params={
+                "league": self._clean_id(league_id, "league_id"),
+                "season": int(season),
+                "current": str(current).lower() if current is not None else None,
+                "dates": "true" if include_dates else None,
+            },
+        )
+        response = data.get("response")
+        if not isinstance(response, list):
+            raise APIFootballAPIError(
+                "API-Football devolvió jornadas con formato inesperado.",
+                endpoint="fixtures/rounds",
+                code="invalid_envelope",
+            )
+        return deepcopy(response)
+
+    def get_leagues(
+        self,
+        *,
+        league_id: str | int | None = None,
+        team_id: str | int | None = None,
+        country: str | None = None,
+        code: str | None = None,
+        season: int | None = None,
+        current: bool | None = None,
+        search: str | None = None,
+        league_type: str | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "leagues",
+            params={
+                "id": self._clean_id(league_id, "league_id") if league_id is not None else None,
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+                "country": country,
+                "code": code,
+                "season": int(season) if season is not None else None,
+                "current": str(current).lower() if current is not None else None,
+                "search": search,
+                "type": league_type,
+            },
+        )
+        normalized: list[dict] = []
+        for item in self._response_items(data, "leagues"):
+            seasons = item.get("seasons") if isinstance(item.get("seasons"), list) else []
+            normalized.append(
+                {
+                    "league": self._entity(item.get("league")),
+                    "country": deepcopy(item.get("country") or {}),
+                    "seasons": deepcopy(seasons),
+                    "source_provider": self.provider_name,
+                    "provider_payload": item,
+                }
+            )
+        return normalized
+
+    def get_league_coverage(self, league_id: str | int, season: int) -> dict | None:
+        leagues = self.get_leagues(league_id=league_id, season=season)
+        for item in leagues:
+            for season_item in item.get("seasons") or []:
+                if str(season_item.get("year")) == str(int(season)):
+                    return {
+                        "league": item["league"],
+                        "country": item["country"],
+                        "season": int(season),
+                        "start": season_item.get("start"),
+                        "end": season_item.get("end"),
+                        "current": season_item.get("current"),
+                        "coverage": deepcopy(season_item.get("coverage") or {}),
+                        "source_provider": self.provider_name,
+                    }
+        return None
+
+    @classmethod
+    def _normalize_table_record(cls, raw: object) -> dict[str, object] | None:
+        if not isinstance(raw, dict):
+            return None
+        goals = raw.get("goals") if isinstance(raw.get("goals"), dict) else {}
+        return {
+            "played": cls._metric_value(raw.get("played")),
+            "wins": cls._metric_value(raw.get("win")),
+            "draws": cls._metric_value(raw.get("draw")),
+            "losses": cls._metric_value(raw.get("lose")),
+            "goals_for": cls._metric_value(goals.get("for")),
+            "goals_against": cls._metric_value(goals.get("against")),
+        }
+
+    def get_standings(
+        self,
+        league_id: str | int,
+        season: int,
+        *,
+        team_id: str | int | None = None,
+    ) -> dict:
+        data = self._cached_request(
+            "standings",
+            params={
+                "league": self._clean_id(league_id, "league_id"),
+                "season": int(season),
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+            },
+        )
+        response = self._response_items(data, "standings")
+        if not response:
+            return {
+                "league": {"id": self._clean_id(league_id), "season": int(season)},
+                "groups": [],
+                "source_provider": self.provider_name,
+            }
+
+        raw_item = response[0]
+        raw_league = raw_item.get("league") if isinstance(raw_item.get("league"), dict) else {}
+        raw_groups = raw_league.get("standings") if isinstance(raw_league.get("standings"), list) else []
+        groups: list[dict] = []
+        for index, raw_group in enumerate(raw_groups):
+            if not isinstance(raw_group, list):
+                continue
+            table: list[dict] = []
+            group_name: str | None = None
+            for raw_row in raw_group:
+                if not isinstance(raw_row, dict):
+                    continue
+                if group_name is None and raw_row.get("group"):
+                    group_name = str(raw_row["group"])
+                table.append(
+                    {
+                        "rank": self._metric_value(raw_row.get("rank")),
+                        "team": self._entity(raw_row.get("team")),
+                        "points": self._metric_value(raw_row.get("points")),
+                        "goal_difference": self._metric_value(raw_row.get("goalsDiff")),
+                        "form": raw_row.get("form"),
+                        "status": raw_row.get("status"),
+                        "description": raw_row.get("description"),
+                        "overall": self._normalize_table_record(raw_row.get("all")),
+                        "home": self._normalize_table_record(raw_row.get("home")),
+                        "away": self._normalize_table_record(raw_row.get("away")),
+                        "updated_at": raw_row.get("update"),
+                    }
+                )
+            groups.append(
+                {
+                    "name": group_name or f"Grupo {index + 1}",
+                    "table": table,
+                }
+            )
+
+        league = {key: deepcopy(value) for key, value in raw_league.items() if key != "standings"}
+        if league.get("id") is not None:
+            league["id"] = str(league["id"])
+        return {
+            "league": league,
+            "groups": groups,
+            "source_provider": self.provider_name,
+            "provider_payload": raw_item,
+        }
+
+    @classmethod
+    def _normalize_goal_statistics(cls, raw: object) -> dict[str, object]:
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            "total": cls._split_record(raw.get("total")),
+            "average": cls._split_record(raw.get("average")),
+            "by_minute": deepcopy(raw.get("minute") or {}),
+            "over_under": deepcopy(raw.get("under_over") or {}),
+        }
+
+    def get_team_statistics(
+        self,
+        team_id: str | int,
+        league_id: str | int,
+        season: int,
+        *,
+        through_date: date | str | None = None,
+    ) -> dict | None:
+        date_value = through_date.isoformat() if isinstance(through_date, date) else through_date
+        data = self._cached_request(
+            "teams/statistics",
+            params={
+                "team": self._clean_id(team_id, "team_id"),
+                "league": self._clean_id(league_id, "league_id"),
+                "season": int(season),
+                "date": date_value,
+            },
+        )
+        raw = data.get("response")
+        if raw in (None, []):
+            return None
+        if not isinstance(raw, dict):
+            raise APIFootballAPIError(
+                "API-Football devolvió estadísticas de equipo con formato inesperado.",
+                endpoint="teams/statistics",
+                code="invalid_envelope",
+            )
+        fixture_stats = raw.get("fixtures") if isinstance(raw.get("fixtures"), dict) else {}
+        goals = raw.get("goals") if isinstance(raw.get("goals"), dict) else {}
+        penalties = raw.get("penalty") if isinstance(raw.get("penalty"), dict) else {}
+        return {
+            "team": self._entity(raw.get("team")),
+            "league": self._entity(raw.get("league")),
+            "form": raw.get("form"),
+            "fixtures": {
+                "played": self._split_record(fixture_stats.get("played")),
+                "wins": self._split_record(fixture_stats.get("wins")),
+                "draws": self._split_record(fixture_stats.get("draws")),
+                "losses": self._split_record(fixture_stats.get("loses")),
+            },
+            "goals_for": self._normalize_goal_statistics(goals.get("for")),
+            "goals_against": self._normalize_goal_statistics(goals.get("against")),
+            "biggest": deepcopy(raw.get("biggest") or {}),
+            "clean_sheets": self._split_record(raw.get("clean_sheet")),
+            "failed_to_score": self._split_record(raw.get("failed_to_score")),
+            "penalties": {
+                "scored": deepcopy(penalties.get("scored")),
+                "missed": deepcopy(penalties.get("missed")),
+                "total": self._metric_value(penalties.get("total")),
+            },
+            "formations": deepcopy(raw.get("lineups") or []),
+            "cards": deepcopy(raw.get("cards") or {}),
+            "source_provider": self.provider_name,
+            "provider_payload": deepcopy(raw),
+        }
+
+    @staticmethod
+    def _percentage_value(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            numeric = str(value).strip().removesuffix("%")
+            parsed = float(numeric)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    def get_prediction(self, fixture_id: str | int) -> dict | None:
+        clean_id = self._clean_id(fixture_id, "fixture_id")
+        data = self._cached_request("predictions", params={"fixture": clean_id})
+        response = self._response_items(data, "predictions")
+        if not response:
+            return None
+        raw = response[0]
+        predictions = raw.get("predictions") if isinstance(raw.get("predictions"), dict) else {}
+        percentages = predictions.get("percent") if isinstance(predictions.get("percent"), dict) else {}
+        goals = predictions.get("goals") if isinstance(predictions.get("goals"), dict) else {}
+        comparison = raw.get("comparison") if isinstance(raw.get("comparison"), dict) else {}
+        return {
+            "fixture_id": clean_id,
+            "winner": self._entity(predictions.get("winner")),
+            "win_or_draw": predictions.get("win_or_draw"),
+            "under_over": predictions.get("under_over"),
+            "expected_goals": {
+                "home": self._metric_value(goals.get("home")),
+                "away": self._metric_value(goals.get("away")),
+            },
+            "advice": predictions.get("advice"),
+            "percentages": {
+                "home": self._percentage_value(percentages.get("home")),
+                "draw": self._percentage_value(percentages.get("draw")),
+                "away": self._percentage_value(percentages.get("away")),
+            },
+            "comparison": {
+                key: {
+                    side: self._percentage_value(value)
+                    for side, value in values.items()
+                }
+                for key, values in comparison.items()
+                if isinstance(values, dict)
+            },
+            "teams": deepcopy(raw.get("teams") or {}),
+            "league": self._entity(raw.get("league")),
+            "source_provider": self.provider_name,
+            "provider_payload": raw,
+        }
+
+    @classmethod
+    def _normalize_metric_tree(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return {key: cls._normalize_metric_tree(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [cls._normalize_metric_tree(child) for child in value]
+        return cls._metric_value(value)
+
+    @staticmethod
+    def _metric_key(value: object) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(value).strip().casefold()).strip("_")
+        aliases = {
+            "corner_kicks": "corners",
+            "shots_on_goal": "shots_on_target",
+            "ball_possession": "possession_percentage",
+        }
+        return aliases.get(normalized, normalized)
+
+    def get_fixtures_by_ids(self, fixture_ids: list[str | int]) -> list[dict]:
+        """Fetch up to 20 IDs per documented batch and restore requested order."""
+
+        clean_ids = list(dict.fromkeys(self._clean_id(item, "fixture_id") for item in fixture_ids))
+        if not clean_ids:
+            return []
+        by_id: dict[str, dict] = {}
+        for start in range(0, len(clean_ids), 20):
+            chunk = clean_ids[start : start + 20]
+            data = self._cached_request(
+                "fixtures",
+                params={"ids": "-".join(chunk), "timezone": SPORTS_TIMEZONE.key},
+                ttl=10 * 60,
+            )
+            for item in self._response_items(data, "fixtures"):
+                fixture_id = (item.get("fixture") or {}).get("id")
+                if fixture_id is not None:
+                    by_id[str(fixture_id)] = self._normalize_history_payload(item)
+        return [by_id[fixture_id] for fixture_id in clean_ids if fixture_id in by_id]
+
+    def get_fixture_statistics(
+        self,
+        fixture_id: str | int,
+        *,
+        team_id: str | int | None = None,
+        statistic_type: str | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "fixtures/statistics",
+            params={
+                "fixture": self._clean_id(fixture_id, "fixture_id"),
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+                "type": statistic_type,
+            },
+        )
+        normalized: list[dict] = []
+        for item in self._response_items(data, "fixtures/statistics"):
+            metrics: dict[str, object] = {}
+            for metric in item.get("statistics") or []:
+                if not isinstance(metric, dict):
+                    continue
+                key = self._metric_key(metric.get("type"))
+                if key:
+                    value = metric.get("value")
+                    metrics[key] = (
+                        self._percentage_value(value)
+                        if isinstance(value, str) and value.strip().endswith("%")
+                        else self._metric_value(value)
+                    )
+            normalized.append(
+                {
+                    "team": self._entity(item.get("team")),
+                    "metrics": metrics,
+                    "source_provider": self.provider_name,
+                    "provider_payload": item,
+                }
+            )
+        return normalized
+
+    def get_fixture_events(
+        self,
+        fixture_id: str | int,
+        *,
+        team_id: str | int | None = None,
+        player_id: str | int | None = None,
+        event_type: str | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "fixtures/events",
+            params={
+                "fixture": self._clean_id(fixture_id, "fixture_id"),
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+                "player": self._clean_id(player_id, "player_id") if player_id is not None else None,
+                "type": event_type,
+            },
+        )
+        return [
+            {
+                "time": deepcopy(item.get("time") or {}),
+                "team": self._entity(item.get("team")),
+                "player": self._entity(item.get("player")),
+                "assist": self._entity(item.get("assist")),
+                "type": item.get("type"),
+                "detail": item.get("detail"),
+                "comments": item.get("comments"),
+                "source_provider": self.provider_name,
+                "provider_payload": item,
+            }
+            for item in self._response_items(data, "fixtures/events")
+        ]
+
+    def get_fixture_lineups_data(
+        self,
+        fixture_id: str | int,
+        *,
+        team_id: str | int | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "fixtures/lineups",
+            params={
+                "fixture": self._clean_id(fixture_id, "fixture_id"),
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+            },
+        )
+        return self._response_items(data, "fixtures/lineups")
+
+    @classmethod
+    def _normalize_player_rows(cls, raw_items: list[dict]) -> list[dict]:
+        rows: list[dict] = []
+        for item in raw_items:
+            # /fixtures/players wraps players by team; /players returns one
+            # player plus a statistics array. Convert both to one row shape.
+            if isinstance(item.get("players"), list):
+                team = cls._entity(item.get("team"))
+                player_items = item.get("players") or []
+            else:
+                team = {}
+                player_items = [item]
+            for player_item in player_items:
+                if not isinstance(player_item, dict):
+                    continue
+                player = cls._entity(player_item.get("player"))
+                statistics = player_item.get("statistics")
+                if not isinstance(statistics, list):
+                    statistics = []
+                if not statistics:
+                    rows.append(
+                        {
+                            "player": player,
+                            "team": team,
+                            "league": {},
+                            "games": {},
+                            "substitutes": {},
+                            "shots": {},
+                            "goals": {},
+                            "passes": {},
+                            "tackles": {},
+                            "duels": {},
+                            "dribbles": {},
+                            "fouls": {},
+                            "cards": {},
+                            "penalty": {},
+                            "provider_payload": deepcopy(player_item),
+                        }
+                    )
+                    continue
+                for statistic in statistics:
+                    if not isinstance(statistic, dict):
+                        continue
+                    statistic_team = cls._entity(statistic.get("team")) or team
+                    rows.append(
+                        {
+                            "player": player,
+                            "team": statistic_team,
+                            "league": cls._entity(statistic.get("league")),
+                            "games": cls._normalize_metric_tree(statistic.get("games") or {}),
+                            "substitutes": cls._normalize_metric_tree(statistic.get("substitutes") or {}),
+                            "shots": cls._normalize_metric_tree(statistic.get("shots") or {}),
+                            "goals": cls._normalize_metric_tree(statistic.get("goals") or {}),
+                            "passes": cls._normalize_metric_tree(statistic.get("passes") or {}),
+                            "tackles": cls._normalize_metric_tree(statistic.get("tackles") or {}),
+                            "duels": cls._normalize_metric_tree(statistic.get("duels") or {}),
+                            "dribbles": cls._normalize_metric_tree(statistic.get("dribbles") or {}),
+                            "fouls": cls._normalize_metric_tree(statistic.get("fouls") or {}),
+                            "cards": cls._normalize_metric_tree(statistic.get("cards") or {}),
+                            "penalty": cls._normalize_metric_tree(statistic.get("penalty") or {}),
+                            "provider_payload": deepcopy(player_item),
+                        }
+                    )
+        return rows
+
+    def get_fixture_players(
+        self,
+        fixture_id: str | int,
+        *,
+        team_id: str | int | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "fixtures/players",
+            params={
+                "fixture": self._clean_id(fixture_id, "fixture_id"),
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+            },
+        )
+        rows = self._normalize_player_rows(self._response_items(data, "fixtures/players"))
+        for row in rows:
+            row["source_provider"] = self.provider_name
+        return rows
+
+    def get_fixture_context(
+        self,
+        fixture_id: str | int,
+        *,
+        include_statistics: bool = True,
+        include_events: bool = False,
+        include_lineups: bool = False,
+        include_players: bool = False,
+        optional_reserve: int = 10,
+    ) -> dict:
+        """Build a selective context; optional blocks stop before quota reserve."""
+
+        clean_id = self._clean_id(fixture_id, "fixture_id")
+        result: dict[str, object] = {
+            "fixture_id": clean_id,
+            "fixture": self.get_fixture_details(clean_id),
+            "statistics": [],
+            "events": [],
+            "lineups": [],
+            "players": [],
+            "skipped": [],
+            "source_provider": self.provider_name,
+        }
+        requested = (
+            ("statistics", include_statistics, self.get_fixture_statistics),
+            ("events", include_events, self.get_fixture_events),
+            ("lineups", include_lineups, self.get_fixture_lineups_data),
+            ("players", include_players, self.get_fixture_players),
+        )
+        for key, enabled, fetcher in requested:
+            if not enabled:
+                continue
+            if not self.can_fetch_optional(optional_reserve):
+                result["skipped"].append(key)  # type: ignore[union-attr]
+                continue
+            result[key] = fetcher(clean_id)
+        result["quota"] = self.quota_snapshot
+        return result
+
+    def get_injuries_by_fixture_ids(self, fixture_ids: list[str | int]) -> list[dict]:
+        clean_ids = list(dict.fromkeys(self._clean_id(item, "fixture_id") for item in fixture_ids))
+        injuries: list[dict] = []
+        for start in range(0, len(clean_ids), 20):
+            chunk = clean_ids[start : start + 20]
+            if not chunk:
+                continue
+            data = self._cached_request("injuries", params={"ids": "-".join(chunk)})
+            for item in self._response_items(data, "injuries"):
+                fixture = item.get("fixture") if isinstance(item.get("fixture"), dict) else {}
+                league = item.get("league") if isinstance(item.get("league"), dict) else {}
+                injuries.append(
+                    {
+                        "fixture_id": str(fixture["id"]) if fixture.get("id") is not None else None,
+                        "fixture": deepcopy(fixture),
+                        "league": self._entity(league),
+                        "team": self._entity(item.get("team")),
+                        "player": self._entity(item.get("player")),
+                        "source_provider": self.provider_name,
+                        "provider_payload": item,
+                    }
+                )
+        return injuries
+
+    def get_squads(
+        self,
+        *,
+        team_id: str | int | None = None,
+        player_id: str | int | None = None,
+    ) -> list[dict]:
+        if team_id is None and player_id is None:
+            raise ValueError("get_squads requiere team_id o player_id.")
+        data = self._cached_request(
+            "players/squads",
+            params={
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+                "player": self._clean_id(player_id, "player_id") if player_id is not None else None,
+            },
+        )
+        return [
+            {
+                "team": self._entity(item.get("team")),
+                "players": [self._entity(player) for player in item.get("players") or [] if isinstance(player, dict)],
+                "source_provider": self.provider_name,
+                "provider_payload": item,
+            }
+            for item in self._response_items(data, "players/squads")
+        ]
+
+    def get_player_statistics(
+        self,
+        team_id: str | int,
+        league_id: str | int,
+        season: int,
+        *,
+        player_id: str | int | None = None,
+        page: int = 1,
+    ) -> dict:
+        data = self._cached_request(
+            "players",
+            params={
+                "team": self._clean_id(team_id, "team_id"),
+                "league": self._clean_id(league_id, "league_id"),
+                "season": int(season),
+                "id": self._clean_id(player_id, "player_id") if player_id is not None else None,
+                "page": max(1, int(page)),
+            },
+        )
+        items = self._normalize_player_rows(self._response_items(data, "players"))
+        for item in items:
+            item["source_provider"] = self.provider_name
+        return {
+            "items": items,
+            "paging": deepcopy(data.get("paging") or {}),
+            "source_provider": self.provider_name,
+        }
+
+    def get_player_context(
+        self,
+        team_id: str | int,
+        league_id: str | int,
+        season: int,
+        *,
+        player_id: str | int | None = None,
+        page: int = 1,
+        include_squad: bool = False,
+        optional_reserve: int = 10,
+    ) -> dict:
+        statistics = self.get_player_statistics(
+            team_id,
+            league_id,
+            season,
+            player_id=player_id,
+            page=page,
+        )
+        squad: list[dict] = []
+        skipped: list[str] = []
+        if include_squad:
+            if self.can_fetch_optional(optional_reserve):
+                squad = self.get_squads(team_id=team_id, player_id=player_id)
+            else:
+                skipped.append("squad")
+        return {
+            "team_id": self._clean_id(team_id, "team_id"),
+            "league_id": self._clean_id(league_id, "league_id"),
+            "season": int(season),
+            "players": statistics["items"],
+            "paging": statistics["paging"],
+            "squad": squad,
+            "skipped": skipped,
+            "quota": self.quota_snapshot,
+            "source_provider": self.provider_name,
+        }
+
+    def get_teams(
+        self,
+        *,
+        team_id: str | int | None = None,
+        name: str | None = None,
+        league_id: str | int | None = None,
+        season: int | None = None,
+        country: str | None = None,
+        code: str | None = None,
+        venue_id: str | int | None = None,
+        search: str | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "teams",
+            params={
+                "id": self._clean_id(team_id, "team_id") if team_id is not None else None,
+                "name": name,
+                "league": self._clean_id(league_id, "league_id") if league_id is not None else None,
+                "season": int(season) if season is not None else None,
+                "country": country,
+                "code": code,
+                "venue": self._clean_id(venue_id, "venue_id") if venue_id is not None else None,
+                "search": search,
+            },
+        )
+        return [
+            {
+                "team": self._entity(item.get("team")),
+                "venue": self._entity(item.get("venue")),
+                "source_provider": self.provider_name,
+                "provider_payload": item,
+            }
+            for item in self._response_items(data, "teams")
+        ]
+
+    def get_team_seasons(self, team_id: str | int) -> list[int]:
+        data = self._cached_request(
+            "teams/seasons",
+            params={"team": self._clean_id(team_id, "team_id")},
+        )
+        response = data.get("response")
+        if not isinstance(response, list):
+            raise APIFootballAPIError(
+                "API-Football devolvió temporadas de equipo con formato inesperado.",
+                endpoint="teams/seasons",
+                code="invalid_envelope",
+            )
+        return [int(item) for item in response if isinstance(item, (int, str)) and str(item).isdigit()]
+
+    def get_team_countries(self) -> list[dict]:
+        data = self._cached_request("teams/countries", ttl=7 * 24 * 60 * 60)
+        return self._response_items(data, "teams/countries")
+
+    def get_player_seasons(self, player_id: str | int) -> list[int]:
+        data = self._cached_request(
+            "players/seasons",
+            params={"player": self._clean_id(player_id, "player_id")},
+            ttl=24 * 60 * 60,
+        )
+        response = data.get("response")
+        if not isinstance(response, list):
+            raise APIFootballAPIError(
+                "API-Football devolvió temporadas de jugador con formato inesperado.",
+                endpoint="players/seasons",
+                code="invalid_envelope",
+            )
+        return [int(item) for item in response if isinstance(item, (int, str)) and str(item).isdigit()]
+
+    def get_top_players(self, category: str, league_id: str | int, season: int) -> list[dict]:
+        endpoints = {
+            "scorers": "players/topscorers",
+            "assists": "players/topassists",
+            "yellow_cards": "players/topyellowcards",
+            "red_cards": "players/topredcards",
+        }
+        try:
+            endpoint = endpoints[category]
+        except KeyError as exc:
+            raise ValueError(f"Categoría top no soportada: {category}.") from exc
+        data = self._cached_request(
+            endpoint,
+            params={
+                "league": self._clean_id(league_id, "league_id"),
+                "season": int(season),
+            },
+        )
+        rows = self._normalize_player_rows(self._response_items(data, endpoint))
+        for row in rows:
+            row["category"] = category
+            row["source_provider"] = self.provider_name
+        return rows
+
+    def get_top_scorers(self, league_id: str | int, season: int) -> list[dict]:
+        return self.get_top_players("scorers", league_id, season)
+
+    def get_top_assists(self, league_id: str | int, season: int) -> list[dict]:
+        return self.get_top_players("assists", league_id, season)
+
+    def get_top_yellow_cards(self, league_id: str | int, season: int) -> list[dict]:
+        return self.get_top_players("yellow_cards", league_id, season)
+
+    def get_top_red_cards(self, league_id: str | int, season: int) -> list[dict]:
+        return self.get_top_players("red_cards", league_id, season)
+
+    def get_transfers(
+        self,
+        *,
+        team_id: str | int | None = None,
+        player_id: str | int | None = None,
+    ) -> list[dict]:
+        if team_id is None and player_id is None:
+            raise ValueError("get_transfers requiere team_id o player_id.")
+        data = self._cached_request(
+            "transfers",
+            params={
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+                "player": self._clean_id(player_id, "player_id") if player_id is not None else None,
+            },
+        )
+        return self._response_items(data, "transfers")
+
+    def get_trophies(
+        self,
+        *,
+        player_id: str | int | None = None,
+        coach_id: str | int | None = None,
+    ) -> list[dict]:
+        if player_id is None and coach_id is None:
+            raise ValueError("get_trophies requiere player_id o coach_id.")
+        data = self._cached_request(
+            "trophies",
+            params={
+                "player": self._clean_id(player_id, "player_id") if player_id is not None else None,
+                "coach": self._clean_id(coach_id, "coach_id") if coach_id is not None else None,
+            },
+        )
+        return self._response_items(data, "trophies")
+
+    def get_sidelined(
+        self,
+        *,
+        player_id: str | int | None = None,
+        coach_id: str | int | None = None,
+    ) -> list[dict]:
+        if player_id is None and coach_id is None:
+            raise ValueError("get_sidelined requiere player_id o coach_id.")
+        data = self._cached_request(
+            "sidelined",
+            params={
+                "player": self._clean_id(player_id, "player_id") if player_id is not None else None,
+                "coach": self._clean_id(coach_id, "coach_id") if coach_id is not None else None,
+            },
+        )
+        return self._response_items(data, "sidelined")
+
+    def get_coaches(
+        self,
+        *,
+        coach_id: str | int | None = None,
+        team_id: str | int | None = None,
+        search: str | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "coachs",
+            params={
+                "id": self._clean_id(coach_id, "coach_id") if coach_id is not None else None,
+                "team": self._clean_id(team_id, "team_id") if team_id is not None else None,
+                "search": search,
+            },
+        )
+        return self._response_items(data, "coachs")
+
+    def get_odds_mapping(self, *, page: int = 1) -> dict:
+        data = self._cached_request("odds/mapping", params={"page": max(1, int(page))})
+        return {
+            "items": self._response_items(data, "odds/mapping"),
+            "paging": deepcopy(data.get("paging") or {}),
+            "source_provider": self.provider_name,
+        }
+
+    def get_odds_bookmakers(
+        self,
+        *,
+        bookmaker_id: str | int | None = None,
+        search: str | None = None,
+    ) -> list[dict]:
+        data = self._cached_request(
+            "odds/bookmakers",
+            params={
+                "id": self._clean_id(bookmaker_id, "bookmaker_id") if bookmaker_id is not None else None,
+                "search": search,
+            },
+        )
+        return self._response_items(data, "odds/bookmakers")
+
+    def get_odds_markets(
+        self,
+        *,
+        live: bool = False,
+        market_id: str | int | None = None,
+        search: str | None = None,
+    ) -> list[dict]:
+        endpoint = "odds/live/bets" if live else "odds/bets"
+        data = self._cached_request(
+            endpoint,
+            params={
+                "id": self._clean_id(market_id, "market_id") if market_id is not None else None,
+                "search": search,
+            },
+        )
+        return self._response_items(data, endpoint)
 
     @staticmethod
     def _line_market_key(prefix: str, value: str) -> str | None:
@@ -318,7 +1524,7 @@ class APIFootballProvider:
         *,
         params: dict[str, str],
     ) -> list[dict]:
-        """Request played fixtures and retry once without the status filter.
+        """Request played fixtures and optionally retry an empty successful response.
 
         Some API-Football plans/proxies have returned an empty response when
         ``last`` and the multi-value ``status`` filter are combined, even
@@ -339,19 +1545,19 @@ class APIFootballProvider:
                 if isinstance(item, dict) and self._is_completed_fixture(item)
             ]
 
-        try:
-            requested = completed(self._request(endpoint, params=params))
-        except APIFootballAPIError:
-            if "status" not in params:
-                raise
-            requested = []
+        # Provider failures (especially 403/429/quota exhaustion) must always
+        # propagate. Retrying those without ``status`` only spends another
+        # request and can hide the real operational problem.
+        requested = completed(self._cached_request(endpoint, params=params, ttl=6 * 60 * 60))
         if requested or "status" not in params:
             return requested
 
         compatibility_params = {
             key: value for key, value in params.items() if key != "status"
         }
-        return completed(self._request(endpoint, params=compatibility_params))
+        return completed(
+            self._cached_request(endpoint, params=compatibility_params, ttl=6 * 60 * 60)
+        )
 
     def enrich_fixture_histories(
         self,
@@ -376,7 +1582,11 @@ class APIFootballProvider:
         enriched_by_id: dict[str, dict] = {}
         if fixture_ids:
             try:
-                batch = self._request("fixtures", params={"ids": "-".join(fixture_ids)})
+                batch = self._cached_request(
+                    "fixtures",
+                    params={"ids": "-".join(fixture_ids)},
+                    ttl=60 * 60,
+                )
                 enriched_by_id = {
                     str(fixture_id): item
                     for item in batch.get("response", [])
@@ -557,6 +1767,7 @@ class APIFootballProvider:
             params={
                 "h2h": h2h_param,
                 "last": str(bounded_limit),
+                "status": "FT-AET-PEN",
             },
         )
         return self.normalize_history(completed, bounded_limit)
@@ -602,7 +1813,7 @@ class APIFootballProvider:
 
     def get_fixture_injuries(self, fixture_id: str) -> list[InjuryItem]:
         clean_id = fixture_id.replace("api-football-", "")
-        data = self._request("injuries", params={"fixture": clean_id})
+        data = self._cached_request("injuries", params={"fixture": clean_id})
         items = []
         for item in data.get("response", []):
             player = item.get("player", {}).get("name", "Jugador")
@@ -629,7 +1840,7 @@ class APIFootballProvider:
         away_team_id: str | None = None,
     ) -> LineupsSummary:
         clean_id = fixture_id.removeprefix("api-football-")
-        data = self._request("fixtures/lineups", params={"fixture": clean_id})
+        data = self._cached_request("fixtures/lineups", params={"fixture": clean_id})
         response_list = data.get("response", [])
 
         if not response_list:

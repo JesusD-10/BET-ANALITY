@@ -4,13 +4,27 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.schemas.matches import MatchSummary, RefereeInfo, InjuryItem, H2HMatchItem
+from app.schemas.matches import (
+    EvidenceCoverageItem,
+    EvidenceProvenance,
+    H2HMatchItem,
+    InjuryItem,
+    MatchEvidenceContext,
+    MatchStatisticsSummary,
+    MatchSummary,
+    PlayerContext,
+    PlayerStatisticsSnapshot,
+    RefereeInfo,
+    TeamStatisticsSnapshot,
+    VerifiedOddsEvidence,
+)
 from app.services.ai_analyzer import (
     _available_market_families,
     _consensus_market_payloads,
     _format_recent_history,
     _generate_local_fallback_analysis,
     _goal_profile,
+    _structured_evidence_payload,
     analyze_match_with_ai,
 )
 from app.services.ai_gateway import ai_gateway
@@ -396,6 +410,16 @@ def test_analysis_caps_consensus_quality_and_reports_four_participants(monkeypat
     assert analysis.markets[0].confidence == "Alta"
     assert len(analysis.markets[0].factors_for) == 4
     assert any("participaron 4" in note for note in analysis.notes)
+    assert analysis.ai_consensus.requested == 4
+    assert analysis.ai_consensus.completed == 4
+    assert analysis.ai_consensus.providers == [
+        "deepseek",
+        "cerebras",
+        "xai",
+        "openrouter",
+    ]
+    assert analysis.ai_consensus.required_support == 2
+    assert analysis.ai_consensus.status == "consensus"
 
 
 def test_advanced_families_activate_only_from_explicit_statistics():
@@ -549,3 +573,183 @@ def test_goal_profile_deduplicates_same_fixture_with_timestamp_and_date():
     samples, *_ = _goal_profile([raw], [normalized])
 
     assert samples == 1
+
+
+def _structured_evidence() -> MatchEvidenceContext:
+    fetched_at = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    source = EvidenceProvenance(
+        provider="api-football",
+        endpoint="/teams/statistics",
+        fetched_at=fetched_at,
+        verified=True,
+    )
+    odds_source = EvidenceProvenance(
+        provider="api-football",
+        endpoint="/odds",
+        fetched_at=fetched_at,
+        verified=True,
+    )
+    return MatchEvidenceContext(
+        data_coverage=[
+            EvidenceCoverageItem(
+                section="team_statistics",
+                status="available",
+                sample_size=12,
+                provenance=[source],
+            ),
+            EvidenceCoverageItem(
+                section="players",
+                status="unavailable",
+                reason="La competición no ofrece estadísticas de jugadores.",
+                provenance=[],
+            ),
+            EvidenceCoverageItem(
+                section="verified_odds",
+                status="available",
+                sample_size=1,
+                provenance=[odds_source],
+            ),
+        ],
+        statistics_summary=MatchStatisticsSummary(
+            home=TeamStatisticsSnapshot(
+                team_id="1",
+                team_name="Local",
+                fixtures_played=12,
+                averages={"corners": 6.1, "total_shots": 13.2},
+            ),
+            away=TeamStatisticsSnapshot(
+                team_id="2",
+                team_name="Visitante",
+                fixtures_played=12,
+                averages={"corners": 4.8, "total_shots": 9.4},
+            ),
+        ),
+        # Populated deliberately, but unavailable/unverified coverage must keep
+        # this block out of every AI prompt and response.
+        player_context=PlayerContext(
+            home=[PlayerStatisticsSnapshot(player_name="Jugador fantasma", goals=99)]
+        ),
+        verified_odds=[
+            VerifiedOddsEvidence(
+                market_key="TOTAL_CORNERS_OVER_9_5",
+                selection="Más de 9.5 córners",
+                odds=9.99,
+                bookmaker="HiddenBook",
+                captured_at=fetched_at,
+                provenance=odds_source,
+            )
+        ],
+    )
+
+
+def test_structured_evidence_is_provenance_gated_and_redacts_bookmaker_prices():
+    payload = _structured_evidence_payload(_structured_evidence())
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["statistics_summary"]["home"]["averages"]["corners"] == 6.1
+    assert "player_context" not in payload
+    assert payload["verified_market_availability"] == [
+        {
+            "market_key": "TOTAL_CORNERS_OVER_9_5",
+            "selection": "Más de 9.5 córners",
+            "live": False,
+        }
+    ]
+    assert "9.99" not in serialized
+    assert "HiddenBook" not in serialized
+
+
+def test_ai_receives_structured_sporting_evidence_without_odds_anchor(monkeypatch):
+    match = MatchSummary(
+        id="structured-1",
+        competition="Liga",
+        kickoff_at=datetime.now(timezone.utc),
+        home_team="Local",
+        away_team="Visitante",
+        league_id="10",
+        season=2026,
+        data_quality=0.84,
+        odds_available=True,
+        status="PROGRAMADO",
+    )
+    completion = SimpleNamespace(
+        json_data={
+            "markets": [
+                {
+                    "market_key": "TOTAL_CORNERS_OVER_9_5",
+                    "label": "Córners",
+                    "selection": "Más de 9.5 córners",
+                    "probability": 0.61,
+                    "best_odds": 9.99,
+                    "expected_value": 5.0,
+                    "data_quality": 0.8,
+                    "factors_for": ["Promedios de córners de ambos equipos"],
+                    "risks": ["Varianza del ritmo"],
+                    "evidence_refs": ["team_statistics", "verified_odds"],
+                }
+            ],
+            "notes": [],
+        },
+        provider="cerebras",
+        model="gpt-oss-120b",
+    )
+    captured: dict = {}
+
+    def complete(**kwargs):
+        captured.update(kwargs)
+        return [completion]
+
+    monkeypatch.setattr(ai_gateway, "is_available", lambda: True)
+    monkeypatch.setattr(ai_gateway, "complete_json_consensus", complete)
+
+    analysis = analyze_match_with_ai(match, evidence=_structured_evidence())
+    prompt = captured["messages"][1]["content"]
+
+    assert analysis.markets[0].market_key == "TOTAL_CORNERS_OVER_9_5"
+    assert analysis.markets[0].evidence_refs == ["team_statistics"]
+    assert analysis.markets[0].best_odds is None
+    assert analysis.markets[0].expected_value is None
+    assert analysis.statistics_summary is not None
+    assert analysis.player_context is None
+    assert analysis.verified_odds[0].odds == 9.99
+    assert analysis.ai_consensus.requested == 4
+    assert analysis.ai_consensus.completed == 1
+    assert analysis.ai_consensus.status == "single"
+    assert "9.99" not in prompt
+    assert "HiddenBook" not in prompt
+    assert "no ancles tu estimación" in prompt
+
+
+def test_structured_ai_market_without_verified_evidence_reference_is_rejected(monkeypatch):
+    match = MatchSummary(
+        id="structured-no-ref",
+        competition="Liga",
+        kickoff_at=datetime.now(timezone.utc),
+        home_team="Local",
+        away_team="Visitante",
+        data_quality=0.8,
+        status="PROGRAMADO",
+    )
+    completion = SimpleNamespace(
+        json_data={
+            "markets": [
+                {
+                    "market_key": "TOTAL_GOALS_OVER_2_5",
+                    "selection": "Más de 2.5",
+                    "probability": 0.8,
+                    "evidence_refs": ["players"],
+                }
+            ]
+        },
+        provider="openrouter",
+        model="free",
+    )
+    monkeypatch.setattr(ai_gateway, "is_available", lambda: True)
+    monkeypatch.setattr(ai_gateway, "complete_json_consensus", lambda **_: [completion])
+
+    analysis = analyze_match_with_ai(match, evidence=_structured_evidence())
+
+    assert analysis.model_version == "baseline-poisson-v0.3"
+    assert analysis.ai_consensus.completed == 1
+    assert analysis.ai_consensus.status == "fallback"
+    assert "ninguna selección" in analysis.ai_consensus.reason

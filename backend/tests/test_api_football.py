@@ -1,4 +1,5 @@
 import pytest
+import httpx
 from unittest.mock import MagicMock, patch
 from datetime import date
 
@@ -142,6 +143,43 @@ def test_payload_errors_raise_without_exposing_provider_message(mock_get):
         provider.list_fixtures(date(2026, 8, 7))
 
     assert secret not in str(exc_info.value)
+    assert secret not in repr(exc_info.value.as_envelope())
+    assert exc_info.value.as_envelope()["endpoint"] == "fixtures"
+
+
+@patch("httpx.get")
+def test_rate_limit_is_cached_and_blocks_duplicate_network_call(mock_get):
+    request = httpx.Request("GET", "https://v3.football.api-sports.io/fixtures")
+    rate_response = httpx.Response(
+        429,
+        headers={
+            "retry-after": "120",
+            "x-ratelimit-requests-remaining": "0",
+            "x-ratelimit-requests-limit": "100",
+        },
+        request=request,
+    )
+    mock_response = MagicMock()
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "provider detail must stay private",
+        request=request,
+        response=rate_response,
+    )
+    mock_get.return_value = mock_response
+    provider = APIFootballProvider(key="dummy_key")
+
+    with pytest.raises(APIFootballAPIError) as first_error:
+        provider._request("fixtures", {"id": "1001"})
+    with pytest.raises(APIFootballAPIError) as second_error:
+        provider._request("fixtures", {"id": "1001"})
+
+    assert mock_get.call_count == 1
+    assert first_error.value is second_error.value
+    assert first_error.value.code == "rate_limited"
+    assert first_error.value.retryable is True
+    assert first_error.value.cooldown_seconds == 120
+    assert provider.quota_snapshot["remaining"] == 0
+    assert provider.can_fetch_optional() is False
 
 
 @patch("httpx.get")
@@ -793,3 +831,343 @@ def test_prematch_odds_keep_best_exact_quote_and_cache_response(monkeypatch) -> 
 )
 def test_prematch_market_mapping_is_exact(bet, selection, expected) -> None:
     assert APIFootballProvider._prematch_market_key(bet, selection) == expected
+
+
+def test_completed_history_never_retries_provider_error_without_status(monkeypatch) -> None:
+    calls = []
+    provider = APIFootballProvider(key="dummy_key")
+
+    def rejected(endpoint, params=None):
+        calls.append((endpoint, params))
+        raise APIFootballAPIError(
+            "cuota agotada",
+            endpoint=endpoint,
+            code="quota_exhausted",
+            cooldown_seconds=300,
+        )
+
+    monkeypatch.setattr(provider, "_request", rejected)
+
+    with pytest.raises(APIFootballAPIError, match="cuota agotada"):
+        provider.get_team_last_matches("10")
+
+    assert calls == [
+        ("fixtures", {"team": "10", "last": "5", "status": "FT-AET-PEN"})
+    ]
+
+
+def test_quota_headers_are_exposed_and_league_catalog_is_cached(monkeypatch) -> None:
+    calls = []
+    provider = APIFootballProvider(key="dummy_key")
+
+    def fake_request(endpoint, params=None, timeout=None):
+        calls.append((endpoint, params))
+        provider._capture_quota(
+            {
+                "x-ratelimit-requests-remaining": "19",
+                "x-ratelimit-requests-limit": "100",
+            }
+        )
+        return {
+            "response": [
+                {
+                    "league": {"id": 71, "name": "Serie A"},
+                    "country": {"name": "Brazil"},
+                    "seasons": [
+                        {
+                            "year": 2026,
+                            "start": "2026-01-01",
+                            "end": "2026-12-01",
+                            "current": True,
+                            "coverage": {
+                                "fixtures": {
+                                    "statistics_fixtures": True,
+                                    "events": True,
+                                    "lineups": True,
+                                    "statistics_players": True,
+                                },
+                                "standings": True,
+                                "players": True,
+                                "injuries": True,
+                                "predictions": True,
+                                "odds": True,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    first = provider.get_league_coverage("71", 2026)
+    second = provider.get_league_coverage("71", 2026)
+
+    assert calls == [("leagues", {"id": "71", "season": 2026})]
+    assert first == second
+    assert first is not None
+    assert first["league"]["id"] == "71"
+    assert first["coverage"]["fixtures"]["statistics_players"] is True
+    assert provider.quota_snapshot["remaining"] == 19
+    assert provider.quota_snapshot["limit"] == 100
+    assert provider.can_fetch_optional(reserve=10) is True
+    assert provider.can_fetch_optional(reserve=20) is False
+
+
+def test_free_status_call_updates_daily_remaining_quota_and_is_cached(monkeypatch) -> None:
+    calls = []
+    provider = APIFootballProvider(key="dummy_key")
+
+    def fake_request(endpoint, params=None):
+        calls.append((endpoint, params))
+        return {
+            "response": {
+                "account": {"email": "hidden@example.invalid"},
+                "subscription": {"active": True},
+                "requests": {"current": 99, "limit_day": 100},
+            }
+        }
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    first = provider.get_status()
+    second = provider.get_status()
+
+    assert first == second
+    assert calls == [("status", {})]
+    assert provider.quota_snapshot["remaining"] == 1
+    assert provider.quota_snapshot["limit"] == 100
+    assert provider.can_fetch_optional(reserve=1) is False
+
+
+def test_team_statistics_normalize_full_prematch_blocks_and_date(monkeypatch) -> None:
+    calls = []
+    provider = APIFootballProvider(key="dummy_key")
+    raw = {
+        "league": {"id": 71, "name": "Serie A", "season": 2026},
+        "team": {"id": 10, "name": "Local"},
+        "form": "WWDLW",
+        "fixtures": {
+            "played": {"home": 4, "away": 3, "total": 7},
+            "wins": {"home": 3, "away": 1, "total": 4},
+            "draws": {"home": 1, "away": 1, "total": 2},
+            "loses": {"home": 0, "away": 1, "total": 1},
+        },
+        "goals": {
+            "for": {
+                "total": {"home": 8, "away": 4, "total": 12},
+                "average": {"home": "2.0", "away": "1.3", "total": "1.7"},
+                "minute": {"0-15": {"total": 2, "percentage": "16.67%"}},
+                "under_over": {"2.5": {"over": 4, "under": 3}},
+            },
+            "against": {
+                "total": {"home": 2, "away": 4, "total": 6},
+                "average": {"home": "0.5", "away": "1.3", "total": "0.9"},
+                "minute": {},
+                "under_over": {},
+            },
+        },
+        "biggest": {"streak": {"wins": 3, "draws": 1, "loses": 1}},
+        "clean_sheet": {"home": 2, "away": 1, "total": 3},
+        "failed_to_score": {"home": 0, "away": 1, "total": 1},
+        "penalty": {"scored": {"total": 2}, "missed": {"total": 1}, "total": 3},
+        "lineups": [{"formation": "4-3-3", "played": 5}],
+        "cards": {"yellow": {"0-15": {"total": None, "percentage": None}}},
+    }
+
+    def fake_request(endpoint, params=None):
+        calls.append((endpoint, params))
+        return {"response": raw}
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    stats = provider.get_team_statistics("10", "71", 2026, through_date=date(2026, 8, 20))
+
+    assert calls == [
+        (
+            "teams/statistics",
+            {"team": "10", "league": "71", "season": 2026, "date": "2026-08-20"},
+        )
+    ]
+    assert stats is not None
+    assert stats["team"]["id"] == "10"
+    assert stats["fixtures"]["losses"]["total"] == 1
+    assert stats["goals_for"]["average"]["total"] == 1.7
+    assert stats["goals_for"]["over_under"]["2.5"]["over"] == 4
+    assert stats["clean_sheets"]["total"] == 3
+    assert stats["cards"]["yellow"]["0-15"]["total"] is None
+
+
+def test_standings_and_prediction_have_stable_canonical_shapes(monkeypatch) -> None:
+    provider = APIFootballProvider(key="dummy_key")
+
+    def fake_request(endpoint, params=None):
+        if endpoint == "standings":
+            return {
+                "response": [
+                    {
+                        "league": {
+                            "id": 71,
+                            "name": "Serie A",
+                            "season": 2026,
+                            "standings": [
+                                [
+                                    {
+                                        "rank": 1,
+                                        "team": {"id": 10, "name": "Local"},
+                                        "points": 33,
+                                        "goalsDiff": 12,
+                                        "group": "Serie A",
+                                        "form": "WWDLW",
+                                        "status": "same",
+                                        "description": None,
+                                        "all": {
+                                            "played": 15,
+                                            "win": 10,
+                                            "draw": 3,
+                                            "lose": 2,
+                                            "goals": {"for": 30, "against": 18},
+                                        },
+                                        "home": None,
+                                        "away": None,
+                                        "update": "2026-08-10",
+                                    }
+                                ]
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "response": [
+                {
+                    "predictions": {
+                        "winner": {"id": 10, "name": "Local", "comment": "Win or draw"},
+                        "win_or_draw": True,
+                        "under_over": "-3.5",
+                        "goals": {"home": "2.1", "away": None},
+                        "advice": "Double chance : Local or draw",
+                        "percent": {"home": "45%", "draw": "40%", "away": "15%"},
+                    },
+                    "comparison": {
+                        "form": {"home": "60%", "away": "40%"},
+                        "total": {"home": "65.4%", "away": "34.6%"},
+                    },
+                    "league": {"id": 71, "name": "Serie A"},
+                    "teams": {"home": {"id": 10}, "away": {"id": 12}},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    standings = provider.get_standings("71", 2026)
+    prediction = provider.get_prediction("1001")
+
+    row = standings["groups"][0]["table"][0]
+    assert row["rank"] == 1
+    assert row["goal_difference"] == 12
+    assert row["overall"] == {
+        "played": 15,
+        "wins": 10,
+        "draws": 3,
+        "losses": 2,
+        "goals_for": 30,
+        "goals_against": 18,
+    }
+    assert row["home"] is None
+    assert prediction is not None
+    assert prediction["winner"]["id"] == "10"
+    assert prediction["expected_goals"] == {"home": 2.1, "away": None}
+    assert prediction["percentages"] == {"home": 45.0, "draw": 40.0, "away": 15.0}
+    assert prediction["comparison"]["total"]["home"] == 65.4
+
+
+def test_fixture_and_player_context_normalize_all_available_metrics(monkeypatch) -> None:
+    calls = []
+    provider = APIFootballProvider(key="dummy_key")
+
+    def fake_request(endpoint, params=None):
+        calls.append((endpoint, params))
+        if endpoint == "fixtures/statistics":
+            return {
+                "response": [
+                    {
+                        "team": {"id": 10, "name": "Local"},
+                        "statistics": [
+                            {"type": "Shots on Goal", "value": 7},
+                            {"type": "Ball Possession", "value": "58%"},
+                            {"type": "Red Cards", "value": None},
+                        ],
+                    }
+                ]
+            }
+        if endpoint == "players":
+            return {
+                "paging": {"current": 1, "total": 1},
+                "response": [
+                    {
+                        "player": {"id": 9, "name": "Delantero"},
+                        "statistics": [
+                            {
+                                "team": {"id": 10, "name": "Local"},
+                                "league": {"id": 71, "name": "Serie A"},
+                                "games": {"appearences": 12, "minutes": 900, "rating": "7.25"},
+                                "shots": {"total": 30, "on": 18},
+                                "goals": {"total": 8, "assists": 4},
+                                "cards": {"yellow": 2, "red": None},
+                            }
+                        ],
+                    }
+                ],
+            }
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    fixture_stats = provider.get_fixture_statistics("1001")
+    players = provider.get_player_statistics("10", "71", 2026)
+
+    assert fixture_stats[0]["metrics"] == {
+        "shots_on_target": 7,
+        "possession_percentage": 58.0,
+        "red_cards": None,
+    }
+    player = players["items"][0]
+    assert player["player"]["id"] == "9"
+    assert player["games"]["rating"] == 7.25
+    assert player["goals"] == {"total": 8, "assists": 4}
+    assert player["cards"]["red"] is None
+    assert calls == [
+        ("fixtures/statistics", {"fixture": "1001"}),
+        ("players", {"team": "10", "league": "71", "season": 2026, "page": 1}),
+    ]
+
+
+def test_fixture_batch_chunks_ids_and_odds_catalogs_are_cacheable(monkeypatch) -> None:
+    calls = []
+    provider = APIFootballProvider(key="dummy_key")
+
+    def fake_request(endpoint, params=None):
+        calls.append((endpoint, params))
+        if endpoint == "fixtures":
+            ids = params["ids"].split("-")
+            return {"response": [{"fixture": {"id": int(item)}} for item in ids]}
+        return {"response": [{"id": 1, "name": "Match Winner"}]}
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+    ids = list(range(1, 22))
+
+    fixtures = provider.get_fixtures_by_ids(ids)
+    first_markets = provider.get_odds_markets()
+    second_markets = provider.get_odds_markets()
+
+    assert len(fixtures) == 21
+    assert first_markets == second_markets
+    fixture_calls = [call for call in calls if call[0] == "fixtures"]
+    assert len(fixture_calls) == 2
+    assert fixture_calls[0][1]["ids"] == "-".join(str(item) for item in range(1, 21))
+    assert fixture_calls[1][1]["ids"] == "21"
+    assert [call for call in calls if call[0] == "odds/bets"] == [
+        ("odds/bets", {})
+    ]
