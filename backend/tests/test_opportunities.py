@@ -106,7 +106,7 @@ def test_settings_clamp_slow_values_and_ignore_placeholders() -> None:
         football_data_timeout_seconds=30,
         sports_data_total_timeout_seconds=120,
         ai_max_provider_attempts=30,
-        xai_api_key="XAI_API_KEY",
+        groq_api_key="GROQ_API_KEY",
         api_football_key="your_api_football_key_here",
         sportmonks_api_token="your_sportmonks_api_token_here",
     )
@@ -118,7 +118,7 @@ def test_settings_clamp_slow_values_and_ignore_placeholders() -> None:
     assert configured.football_data_timeout_seconds == 15
     assert configured.sports_data_total_timeout_seconds == 60
     assert configured.ai_max_provider_attempts == 4
-    assert configured.xai_api_key == ""
+    assert configured.groq_api_key == ""
     assert configured.api_football_key == ""
     assert configured.sportmonks_api_token == ""
 

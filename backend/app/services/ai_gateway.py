@@ -68,12 +68,12 @@ class AIProviderStatus:
 
 
 _TASK_PROVIDER_ORDER: dict[str, tuple[str, ...]] = {
-    "analysis": ("deepseek", "cerebras", "xai", "openrouter"),
-    "assistant": ("xai", "cerebras", "deepseek", "openrouter"),
-    "general": ("cerebras", "deepseek", "xai", "openrouter"),
+    "analysis": ("cerebras", "deepseek", "groq", "openrouter"),
+    "assistant": ("cerebras", "groq", "deepseek", "openrouter"),
+    "general": ("cerebras", "groq", "deepseek", "openrouter"),
 }
 
-_PAID_PROVIDERS = frozenset({"xai", "deepseek"})
+_PAID_PROVIDERS = frozenset({"deepseek"})
 
 
 def _provider_specs(config: Settings) -> list[AIProviderSpec]:
@@ -83,16 +83,17 @@ def _provider_specs(config: Settings) -> list[AIProviderSpec]:
 
     return [
         AIProviderSpec(
-            name="xai",
-            api_key=config.xai_api_key,
-            base_url=config.xai_base_url,
-            model=config.xai_model,
-        ),
-        AIProviderSpec(
             name="deepseek",
             api_key=config.deepseek_api_key,
             base_url=config.deepseek_base_url,
             model=config.deepseek_model,
+        ),
+        AIProviderSpec(
+            name="groq",
+            api_key=config.groq_api_key,
+            base_url=config.groq_base_url,
+            model=config.groq_model,
+            token_parameter="max_completion_tokens",
         ),
         AIProviderSpec(
             name="cerebras",
@@ -100,13 +101,6 @@ def _provider_specs(config: Settings) -> list[AIProviderSpec]:
             base_url=config.cerebras_base_url,
             model=config.cerebras_model,
             token_parameter="max_completion_tokens",
-        ),
-        AIProviderSpec(
-            name="github",
-            api_key=config.github_models_token,
-            base_url=config.github_models_base_url,
-            model=config.github_models_model,
-            retired_reason="GitHub Models inference fue retirado el 30-07-2026",
         ),
         AIProviderSpec(
             name="openrouter",

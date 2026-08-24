@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # contrasta hasta cuatro proveedores en paralelo dentro de un plazo común.
     ai_enabled: bool = True
 
-    # Puede ponerse en false para excluir xAI y DeepSeek cuando se quiera un
+    # Puede ponerse en false para excluir DeepSeek cuando se quiera un
     # despliegue estrictamente gratuito. El consenso de cuatro requiere true.
     ai_allow_paid_providers: bool = True
 
@@ -34,12 +34,12 @@ class Settings(BaseSettings):
 
     ai_max_provider_attempts: int = 4
 
-    # xAI / Grok
-    xai_api_key: str = ""
+    # Groq (API compatible con Chat Completions de OpenAI)
+    groq_api_key: str = ""
 
-    xai_base_url: str = "https://api.x.ai/v1"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
 
-    xai_model: str = "grok-4.3"
+    groq_model: str = "openai/gpt-oss-120b"
 
     # DeepSeek
     deepseek_api_key: str = ""
@@ -54,15 +54,6 @@ class Settings(BaseSettings):
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
 
     cerebras_model: str = "gpt-oss-120b"
-
-    # GitHub Models cerró su servicio de inferencia el 30-07-2026. Se
-    # conservan estos campos solo para diagnosticar configuraciones antiguas;
-    # el orquestador nunca enviará tráfico a ese endpoint retirado.
-    github_models_token: str = ""
-
-    github_models_base_url: str = "https://models.github.ai/inference"
-
-    github_models_model: str = "retired"
 
     # OpenRouter: el router `openrouter/free` limita el tráfico a modelos sin
     # costo, sujeto a su disponibilidad y cuotas diarias.
@@ -198,10 +189,9 @@ class Settings(BaseSettings):
         return clean_value
 
     @field_validator(
-        "xai_api_key",
+        "groq_api_key",
         "deepseek_api_key",
         "cerebras_api_key",
-        "github_models_token",
         "openrouter_api_key",
         "api_football_key",
         "sportmonks_api_token",

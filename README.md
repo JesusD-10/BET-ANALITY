@@ -12,7 +12,7 @@ Plataforma web de inteligencia deportiva para el análisis avanzado de partidos 
 - 🟨 **Disciplina y árbitro**: identifica al árbitro asignado y calcula por separado los promedios recientes verificados de faltas, amarillas y rojas de cada equipo. Si la API no entrega métricas históricas del árbitro, se indica `N/D` en vez de inventarlas.
 - 🚑 **Lesionados y Sancionados**: Detección de bajas confirmadas o dudas clave en la plantilla y evaluación de su impacto táctico.
 - 📋 **Alineaciones y Formaciones**: once probable calculado desde titulares y formaciones recientes, excluyendo bajas confirmadas; desde T-60 se consulta el dato oficial y solo se confirma un equipo cuando el proveedor entrega formación y 11 titulares válidos. Ambos onces se representan sobre una simulación visual 4-3-3.
-- 🤖 **Motor multi-IA** (xAI/Grok, DeepSeek, Cerebras y OpenRouter):
+- 🤖 **Motor multi-IA** (Groq, DeepSeek, Cerebras y OpenRouter):
   - Contrasta en paralelo hasta cuatro proveedores para cada análisis y acepta resultados parciales dentro de un plazo común.
   - Mantiene un motor local cuando no hay claves, cuota o respuesta externa.
   - El backend exige apoyo independiente, descarta empates entre selecciones opuestas, limita valores atípicos y recalcula **Cuota Justa** ($1 / \text{probabilidad}$) y **Valor Esperado (EV %)**; ninguna IA puede imponer cuotas de una casa.
@@ -54,7 +54,7 @@ BET_ANALIZADOR/
 - **Python** 3.11 o superior.
 - **Node.js** 18 o superior.
 - Claves de API (opcionales para modo en vivo):
-  - Una o más claves de IA: `CEREBRAS_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY` o `DEEPSEEK_API_KEY`.
+  - Una o más claves de IA: `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY` u `OPENROUTER_API_KEY`.
   - Una o más de `API_FOOTBALL_KEY`, `SPORTMONKS_API_TOKEN` y `FOOTBALL_DATA_API_TOKEN` para datos reales.
 
 ---
@@ -75,9 +75,9 @@ AI_PROVIDER_TIMEOUT_SECONDS=18
 AI_TOTAL_TIMEOUT_SECONDS=22
 AI_MAX_PROVIDER_ATTEMPTS=4
 
-XAI_API_KEY=
-XAI_BASE_URL=https://api.x.ai/v1
-XAI_MODEL=grok-4.3
+GROQ_API_KEY=
+GROQ_BASE_URL=https://api.groq.com/openai/v1
+GROQ_MODEL=openai/gpt-oss-120b
 
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
@@ -133,12 +133,10 @@ detalle, reduciendo latencia y posibles restricciones del plan. Render registra
 fecha, zona horaria, cantidad bruta, cuota restante y nombre del plan, nunca el
 token.
 
-Cerebras ofrece un nivel gratuito y `openrouter/free` limita el enrutamiento a
-modelos gratuitos, sujeto a sus cuotas y disponibilidad. xAI/Grok y DeepSeek no
-son servicios gratuitos permanentes: `AI_ALLOW_PAID_PROVIDERS=true` permite que
-participen y puede generar cargos. Cámbialo a `false` para excluirlos. GitHub Models fue retirado
-por GitHub el 30 de julio de 2026, por lo que no se envía tráfico a su antiguo
-endpoint; el registro del motor queda preparado para incorporar un reemplazo.
+Groq y Cerebras ofrecen niveles gratuitos sujetos a cuota, y `openrouter/free`
+limita el enrutamiento a modelos gratuitos disponibles. DeepSeek cobra por uso:
+`AI_ALLOW_PAID_PROVIDERS=true` permite que participe y puede generar cargos;
+cámbialo a `false` para excluirlo sin desactivar los otros tres proveedores.
 
 En Render, agrega todas las claves únicamente al servicio **backend** desde
 `Environment`. Deben guardarse como secretos; nunca deben ponerse en el frontend,

@@ -14,10 +14,9 @@ from app.services.ai_gateway import (
 
 def _settings(**overrides) -> Settings:
     values = {
-        "xai_api_key": "",
         "deepseek_api_key": "",
+        "groq_api_key": "",
         "cerebras_api_key": "",
-        "github_models_token": "",
         "openrouter_api_key": "",
         "ai_provider_timeout_seconds": 2,
         "ai_total_timeout_seconds": 5,
@@ -28,11 +27,11 @@ def _settings(**overrides) -> Settings:
     return Settings(_env_file=None, **values)
 
 
-def test_free_mode_routes_only_cerebras_and_openrouter_deterministically() -> None:
+def test_free_mode_routes_groq_cerebras_and_openrouter_deterministically() -> None:
     gateway = AIGateway(
         _settings(
-            xai_api_key="xai-key",
             deepseek_api_key="deepseek-key",
+            groq_api_key="groq-key",
             cerebras_api_key="cerebras-key",
             openrouter_api_key="openrouter-key",
         )
@@ -42,16 +41,15 @@ def test_free_mode_routes_only_cerebras_and_openrouter_deterministically() -> No
     second = gateway._ordered_providers("analysis", "fixture-123")
 
     assert [provider.name for provider in first] == [provider.name for provider in second]
-    assert {provider.name for provider in first} == {"cerebras", "openrouter"}
+    assert {provider.name for provider in first} == {"cerebras", "groq", "openrouter"}
 
 
 def test_paid_providers_require_explicit_opt_in_even_with_keys() -> None:
     free_gateway = AIGateway(
-        _settings(xai_api_key="xai-key", deepseek_api_key="deepseek-key")
+        _settings(deepseek_api_key="deepseek-key")
     )
     paid_gateway = AIGateway(
         _settings(
-            xai_api_key="xai-key",
             deepseek_api_key="deepseek-key",
             ai_allow_paid_providers=True,
         )
@@ -60,25 +58,8 @@ def test_paid_providers_require_explicit_opt_in_even_with_keys() -> None:
     statuses = {status.name: status for status in free_gateway.provider_statuses()}
 
     assert free_gateway.is_available() is False
-    assert statuses["xai"].state == "paid-disabled"
     assert statuses["deepseek"].state == "paid-disabled"
-    assert {provider.name for provider in paid_gateway._live_providers()} == {
-        "xai",
-        "deepseek",
-    }
-
-
-def test_github_models_is_reported_as_retired_and_never_called() -> None:
-    gateway = AIGateway(
-        _settings(github_models_token="legacy-token", cerebras_api_key="live-key")
-    )
-
-    statuses = {status.name: status for status in gateway.provider_statuses()}
-    routed = gateway._ordered_providers("general", "request")
-
-    assert statuses["github"].state == "retired"
-    assert "30-07-2026" in (statuses["github"].detail or "")
-    assert [provider.name for provider in routed] == ["cerebras"]
+    assert {provider.name for provider in paid_gateway._live_providers()} == {"deepseek"}
 
 
 def test_invalid_json_falls_through_to_next_provider(monkeypatch) -> None:
@@ -110,8 +91,8 @@ def test_invalid_json_falls_through_to_next_provider(monkeypatch) -> None:
 def test_provider_attempts_are_bounded(monkeypatch) -> None:
     gateway = AIGateway(
         _settings(
-            xai_api_key="one",
             deepseek_api_key="two",
+            groq_api_key="three",
             cerebras_api_key="three",
             openrouter_api_key="four",
             ai_max_provider_attempts=2,
@@ -149,9 +130,30 @@ def test_no_credentials_uses_explicit_unavailable_signal() -> None:
 
 
 def test_provider_spec_repr_never_contains_secret() -> None:
-    provider = _provider_specs(_settings(xai_api_key="top-secret"))[0]
+    provider = next(
+        provider
+        for provider in _provider_specs(_settings(groq_api_key="top-secret"))
+        if provider.name == "groq"
+    )
 
     assert "top-secret" not in repr(provider)
+
+
+def test_groq_settings_load_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "groq-from-env")
+    monkeypatch.setenv("GROQ_BASE_URL", "https://groq.example/v1/")
+    monkeypatch.setenv("GROQ_MODEL", "groq-test-model")
+
+    configured = Settings(_env_file=None)
+    groq = next(
+        provider
+        for provider in _provider_specs(configured)
+        if provider.name == "groq"
+    )
+
+    assert groq.api_key == "groq-from-env"
+    assert groq.base_url == "https://groq.example/v1/"
+    assert groq.model == "groq-test-model"
 
 
 def test_cerebras_uses_current_completion_token_parameter() -> None:
@@ -168,6 +170,25 @@ def test_cerebras_uses_current_completion_token_parameter() -> None:
         None,
     )
 
+    assert payload["max_completion_tokens"] == 700
+    assert "max_tokens" not in payload
+
+
+def test_groq_uses_current_model_and_completion_token_parameter() -> None:
+    groq = next(
+        provider
+        for provider in _provider_specs(_settings(groq_api_key="key"))
+        if provider.name == "groq"
+    )
+
+    payload = _completion_payload(
+        groq,
+        [{"role": "user", "content": "consulta"}],
+        700,
+        {"type": "json_object"},
+    )
+
+    assert groq.model == "openai/gpt-oss-120b"
     assert payload["max_completion_tokens"] == 700
     assert "max_tokens" not in payload
 
@@ -240,8 +261,8 @@ def test_analysis_consensus_calls_four_providers_in_parallel_and_keeps_order(
 ) -> None:
     gateway = AIGateway(
         _settings(
-            xai_api_key="xai",
             deepseek_api_key="deepseek",
+            groq_api_key="groq",
             cerebras_api_key="cerebras",
             openrouter_api_key="openrouter",
             ai_max_provider_attempts=4,
@@ -275,8 +296,8 @@ def test_analysis_consensus_respects_attempt_cap_and_keeps_partial_results(
 ) -> None:
     gateway = AIGateway(
         _settings(
-            xai_api_key="xai",
             deepseek_api_key="deepseek",
+            groq_api_key="groq",
             cerebras_api_key="cerebras",
             openrouter_api_key="openrouter",
             ai_max_provider_attempts=3,
@@ -331,8 +352,8 @@ def test_analysis_consensus_accepts_one_valid_provider(monkeypatch) -> None:
 
 
 def test_http_adapter_uses_compatible_chat_endpoint(monkeypatch) -> None:
-    gateway = AIGateway(_settings(xai_api_key="xai-secret"))
-    xai = next(provider for provider in _provider_specs(gateway.config) if provider.name == "xai")
+    gateway = AIGateway(_settings(groq_api_key="groq-secret"))
+    groq = next(provider for provider in _provider_specs(gateway.config) if provider.name == "groq")
     captured: dict = {}
 
     class FakeClient:
@@ -351,7 +372,7 @@ def test_http_adapter_uses_compatible_chat_endpoint(monkeypatch) -> None:
                 200,
                 request=httpx.Request("POST", url),
                 json={
-                    "model": "grok-4.3",
+                    "model": "openai/gpt-oss-120b",
                     "choices": [{"message": {"content": "respuesta"}}],
                 },
             )
@@ -359,15 +380,15 @@ def test_http_adapter_uses_compatible_chat_endpoint(monkeypatch) -> None:
     monkeypatch.setattr("app.services.ai_gateway.httpx.Client", FakeClient)
 
     content, model = gateway._request_provider(
-        xai,
+        groq,
         [{"role": "user", "content": "consulta"}],
         timeout=2,
         max_tokens=100,
         response_format=None,
     )
 
-    assert captured["url"] == "https://api.x.ai/v1/chat/completions"
-    assert captured["headers"]["Authorization"] == "Bearer xai-secret"
-    assert captured["payload"]["max_tokens"] == 100
+    assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer groq-secret"
+    assert captured["payload"]["max_completion_tokens"] == 100
     assert content == "respuesta"
-    assert model == "grok-4.3"
+    assert model == "openai/gpt-oss-120b"

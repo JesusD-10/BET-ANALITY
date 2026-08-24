@@ -375,7 +375,7 @@ def test_analysis_caps_consensus_quality_and_reports_four_participants(monkeypat
         status="PROGRAMADO",
     )
     completions = []
-    for index, provider in enumerate(("deepseek", "cerebras", "xai", "openrouter")):
+    for index, provider in enumerate(("deepseek", "cerebras", "groq", "openrouter")):
         completions.append(
             SimpleNamespace(
                 json_data={
@@ -415,7 +415,7 @@ def test_analysis_caps_consensus_quality_and_reports_four_participants(monkeypat
     assert analysis.ai_consensus.providers == [
         "deepseek",
         "cerebras",
-        "xai",
+        "groq",
         "openrouter",
     ]
     assert analysis.ai_consensus.required_support == 2
