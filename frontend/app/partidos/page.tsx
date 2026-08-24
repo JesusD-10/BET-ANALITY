@@ -2,7 +2,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { Suspense, useEffect, useMemo, useState, useTransition } from "react";
 import { useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowUpRight, Search } from "lucide-react";
 import AppShell, { PageHeader, ResponsibleNote } from "../components/AppShell";
@@ -16,7 +16,7 @@ import {
 } from "../lib/api";
 import { findLeagueByName, getLeagueById } from "../lib/leagues";
 
-export default function PartidosPage() {
+function PartidosContent() {
   const searchParams = useSearchParams();
   const selectedLeagueId = searchParams.get("liga");
   const selectedLeague = selectedLeagueId ? getLeagueById(selectedLeagueId) : undefined;
@@ -206,5 +206,31 @@ export default function PartidosPage() {
 
       <ResponsibleNote />
     </AppShell>
+  );
+}
+
+function PartidosLoading() {
+  return (
+    <AppShell>
+      <PageHeader
+        eyebrow="AGENDA · BUSQUEDA Y CALENDARIO"
+        title="Partidos"
+        action={
+          <Link className="outline-link" href="/">
+            Volver al panorama <ArrowUpRight size={15} />
+          </Link>
+        }
+      />
+      <div className="empty-state">Preparando agenda...</div>
+      <ResponsibleNote />
+    </AppShell>
+  );
+}
+
+export default function PartidosPage() {
+  return (
+    <Suspense fallback={<PartidosLoading />}>
+      <PartidosContent />
+    </Suspense>
   );
 }
