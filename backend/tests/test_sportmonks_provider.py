@@ -336,12 +336,36 @@ def test_sportmonks_follows_pagination_without_duplicates(monkeypatch) -> None:
 
 def test_sportmonks_get_fixture_routes_own_namespace(monkeypatch) -> None:
     captured: dict = {}
+    finished = _sportmonks_fixture(77, state="FT", state_id=5)
+    finished["minute"] = 90
+    finished["scores"] = [
+        {
+            "description": "CURRENT",
+            "participant_id": 11,
+            "score": {"goals": 3, "participant": "home"},
+        },
+        {
+            "description": "CURRENT",
+            "participant_id": 22,
+            "score": {"goals": 1, "participant": "away"},
+        },
+        {
+            "description": "1ST_HALF",
+            "participant_id": 11,
+            "score": {"goals": 2, "participant": "home"},
+        },
+        {
+            "description": "1ST_HALF",
+            "participant_id": 22,
+            "score": {"goals": 0, "participant": "away"},
+        },
+    ]
 
     def fake_get(url: str, **kwargs):
         captured.update(url=url, **kwargs)
         return httpx.Response(
             200,
-            json={"data": _sportmonks_fixture(77)},
+            json={"data": finished},
             request=httpx.Request("GET", url),
         )
 
@@ -355,6 +379,14 @@ def test_sportmonks_get_fixture_routes_own_namespace(monkeypatch) -> None:
     assert fixture.id == "sportmonks-77"
     assert captured["url"].endswith("/fixtures/77")
     assert captured["params"]["timezone"] == "America/Lima"
+    assert captured["params"]["include"] == (
+        "participants;league.country;state;scores;venue;referees.type"
+    )
+    assert fixture.status == "FINALIZADO"
+    assert fixture.status_short == "FT"
+    assert fixture.elapsed == 90
+    assert (fixture.home_score, fixture.away_score) == (3, 1)
+    assert (fixture.halftime_home_score, fixture.halftime_away_score) == (2, 0)
 
 
 def test_sportmonks_invalid_agenda_payload_is_typed_failure(monkeypatch) -> None:

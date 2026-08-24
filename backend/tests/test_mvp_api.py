@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
@@ -5,6 +7,8 @@ from types import SimpleNamespace
 from app.api import routes as routes_module
 from app.core.config import settings
 from app.main import app
+from app.schemas.matches import MatchSummary
+from app.services import matches as matches_service
 from app.services.ai_gateway import ai_gateway
 from app.services.matches import _analysis_cache, _fixture_by_id, _fixture_cache
 
@@ -52,6 +56,57 @@ def test_analysis_exposes_fair_odds_and_without_odds_mode() -> None:
     first_market = response.json()["markets"][0]
     assert first_market["fair_odds"] > 1.0
     assert "probability" in first_market
+
+
+def test_sportmonks_finished_score_survives_analysis_endpoint(monkeypatch) -> None:
+    finished = MatchSummary(
+        id="sportmonks-77",
+        external_id="77",
+        competition="Liga 1",
+        kickoff_at=datetime(2026, 8, 12, 22, 0, tzinfo=timezone.utc),
+        home_team="Alianza Lima",
+        away_team="Universitario",
+        home_team_id="11",
+        away_team_id="22",
+        home_score=3,
+        away_score=1,
+        halftime_home_score=2,
+        halftime_away_score=0,
+        elapsed=90,
+        status_short="FT",
+        status="FINALIZADO",
+        source_provider="sportmonks",
+    )
+    monkeypatch.setattr(settings, "sports_data_provider", "sportmonks")
+    monkeypatch.setattr(settings, "sportmonks_api_token", "test-token")
+    monkeypatch.setattr(
+        matches_service.sportmonks_provider,
+        "get_fixture",
+        lambda _fixture_id: finished,
+    )
+    monkeypatch.setattr(
+        matches_service.sportmonks_provider,
+        "get_head_to_head",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        matches_service.sportmonks_provider,
+        "get_team_last_matches",
+        lambda *_args, **_kwargs: [],
+    )
+
+    response = client.get("/api/v1/matches/sportmonks-77/analysis")
+
+    assert response.status_code == 200
+    match = response.json()["match"]
+    assert match["status"] == "FINALIZADO"
+    assert match["status_short"] == "FT"
+    assert match["elapsed"] == 90
+    assert (match["home_score"], match["away_score"]) == (3, 1)
+    assert (
+        match["halftime_home_score"],
+        match["halftime_away_score"],
+    ) == (2, 0)
 
 
 
