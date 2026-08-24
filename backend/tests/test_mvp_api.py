@@ -32,6 +32,19 @@ def test_search_filters_mock_matches() -> None:
     assert [match["home_team"] for match in response.json()["matches"]] == ["Arsenal"]
 
 
+def test_search_accepts_selected_match_date() -> None:
+    response = client.get(
+        "/api/v1/matches/search",
+        params={"q": "Arsenal", "match_date": "2026-07-18"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["date"] == "2026-07-18"
+    assert [match["home_team"] for match in payload["matches"]] == ["Arsenal"]
+    assert payload["matches"][0]["kickoff_at"].startswith("2026-07-18")
+
+
 def test_analysis_exposes_fair_odds_and_without_odds_mode() -> None:
     response = client.get("/api/v1/matches/demo-bayern-dortmund/analysis")
 

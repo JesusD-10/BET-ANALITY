@@ -137,7 +137,7 @@ def test_api_football_h2h_uses_canonical_query_and_keeps_only_completed_rows(
     assert calls == [
         (
             "fixtures/headtohead",
-            {"h2h": "10-12", "last": "5"},
+            {"h2h": "10-12", "last": "5", "status": "FT-AET-PEN"},
         ),
     ]
 
@@ -159,7 +159,10 @@ def test_api_football_h2h_accepts_namespaced_team_ids_without_leaking_prefix(
     )
 
     assert history == []
-    assert calls == [{"h2h": "10-12", "last": "5"}]
+    assert calls == [
+        {"h2h": "10-12", "last": "5", "status": "FT-AET-PEN"},
+        {"h2h": "10-12", "last": "5"},
+    ]
 
 
 def test_published_lineups_are_requested_only_close_to_kickoff() -> None:

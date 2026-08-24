@@ -31,6 +31,51 @@ def test_football_data_maps_confirmed_fixture(monkeypatch) -> None:
     assert matches[0].away_team == "Chelsea"
 
 
+def test_football_data_keeps_finished_fixture_and_result(monkeypatch) -> None:
+    payload = {
+        "matches": [
+            {
+                "id": 124,
+                "area": {"name": "Peru", "code": "PER"},
+                "competition": {
+                    "name": "Liga 1",
+                    "emblem": "https://img.test/liga-1.svg",
+                },
+                "status": "FINISHED",
+                "utcDate": "2026-07-24T19:30:00Z",
+                "homeTeam": {"name": "Alianza Lima"},
+                "awayTeam": {"name": "Universitario"},
+                "score": {
+                    "fullTime": {"home": 3, "away": 1},
+                    "halfTime": {"home": 1, "away": 0},
+                },
+            }
+        ]
+    }
+
+    def fake_get(*args, **kwargs):
+        return httpx.Response(
+            200,
+            json=payload,
+            request=httpx.Request("GET", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    matches = FootballDataProvider(
+        "token", "https://api.football-data.org/v4", 15
+    ).list_fixtures(date(2026, 7, 24))
+
+    assert len(matches) == 1
+    match = matches[0]
+    assert match.status == "FINALIZADO"
+    assert match.status_short == "FINISHED"
+    assert (match.home_score, match.away_score) == (3, 1)
+    assert (match.halftime_home_score, match.halftime_away_score) == (1, 0)
+    assert match.country == "Peru"
+    assert match.country_code == "PER"
+    assert match.competition_logo == "https://img.test/liga-1.svg"
+
+
 def test_football_data_resolves_individual_fixture(monkeypatch) -> None:
     payload = {
         "id": 456,
@@ -201,7 +246,7 @@ def test_sportmonks_uses_bearer_header_and_maps_fixture(monkeypatch) -> None:
     assert "private-token" not in captured["url"]
     assert captured["params"]["timezone"] == "America/Lima"
     assert captured["params"]["per_page"] == 50
-    assert captured["params"]["include"] == "participants;league;state"
+    assert captured["params"]["include"] == "participants;league.country;state;scores"
     assert fixtures[0].id == "sportmonks-9001"
     assert fixtures[0].external_id == "9001"
     assert fixtures[0].home_team == "Alianza Lima"
@@ -212,6 +257,53 @@ def test_sportmonks_uses_bearer_header_and_maps_fixture(monkeypatch) -> None:
     assert fixtures[0].status == "PROGRAMADO"
     assert fixtures[0].odds_available is True
     assert fixtures[0].referee == "Kevin Ortega"
+
+
+def test_sportmonks_maps_live_score_clock_and_halftime() -> None:
+    raw = _sportmonks_fixture(
+        9003,
+        state="INPLAY_2ND_HALF",
+        state_id=22,
+    )
+    raw["minute"] = 67
+    raw["league"] = {
+        "name": "Liga 1",
+        "image_path": "https://img.test/liga-1.png",
+        "country": {"name": "Peru", "iso2": "PE"},
+    }
+    raw["scores"] = [
+        {
+            "description": "CURRENT",
+            "participant_id": 11,
+            "score": {"goals": 2, "participant": "home"},
+        },
+        {
+            "description": "CURRENT",
+            "participant_id": 22,
+            "score": {"goals": 1, "participant": "away"},
+        },
+        {
+            "description": "1ST_HALF",
+            "participant_id": 11,
+            "score": {"goals": 1, "participant": "home"},
+        },
+        {
+            "description": "1ST_HALF",
+            "participant_id": 22,
+            "score": {"goals": 1, "participant": "away"},
+        },
+    ]
+
+    match = SportmonksProvider("token")._to_match_summary(raw)
+
+    assert match.status == "EN JUEGO"
+    assert match.status_short == "INPLAY_2ND_HALF"
+    assert match.elapsed == 67
+    assert (match.home_score, match.away_score) == (2, 1)
+    assert (match.halftime_home_score, match.halftime_away_score) == (1, 1)
+    assert match.country == "Peru"
+    assert match.country_code == "PE"
+    assert match.competition_logo == "https://img.test/liga-1.png"
 
 
 def test_sportmonks_follows_pagination_without_duplicates(monkeypatch) -> None:

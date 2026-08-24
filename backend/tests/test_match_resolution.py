@@ -68,10 +68,14 @@ def _sportmonks_match(fixture_id: str = "sportmonks-1501") -> MatchSummary:
 
 
 @pytest.fixture(autouse=True)
-def clear_match_resolution_state():
+def clear_match_resolution_state(monkeypatch):
     matches_service._fixture_cache.clear()
     matches_service._fixture_by_id.clear()
     matches_service._provider_retry_after.clear()
+    # Existing provider-routing tests remain deterministic and never share a
+    # developer's local SQLite file. Dedicated tests below override these.
+    monkeypatch.setattr(matches_service, "persist_stored_matches", MagicMock())
+    monkeypatch.setattr(matches_service, "load_stored_matches", MagicMock(return_value=[]))
     yield
     matches_service._fixture_cache.clear()
     matches_service._fixture_by_id.clear()
@@ -109,6 +113,86 @@ def test_successful_external_highlights_index_every_fixture(
         for fixture in fixtures
     )
     list_fixtures.assert_called_once_with(SELECTED_DATE)
+
+
+def test_successful_external_highlights_are_persisted(
+    monkeypatch,
+    external_provider: APIFootballProvider,
+) -> None:
+    fixture = _external_match()
+    persist = MagicMock(return_value=1)
+    monkeypatch.setattr(external_provider, "list_fixtures", MagicMock(return_value=[fixture]))
+    monkeypatch.setattr(matches_service, "persist_stored_matches", persist)
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == [fixture]
+    persist.assert_called_once_with([fixture])
+
+
+def test_empty_provider_agenda_falls_back_to_stored_matches(
+    monkeypatch,
+    external_provider: APIFootballProvider,
+) -> None:
+    stored = _external_match(fixture_id="historical-1001").model_copy(
+        update={"source_provider": "historical-football-data"}
+    )
+    monkeypatch.setattr(matches_service, "_provider_chain", lambda: [external_provider])
+    monkeypatch.setattr(external_provider, "list_fixtures", MagicMock(return_value=[]))
+    monkeypatch.setattr(matches_service, "load_stored_matches", MagicMock(return_value=[stored]))
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == [stored]
+    assert result.source == "database"
+    assert result.notice is not None
+    assert matches_service._fixture_by_id[stored.id][1] == stored
+
+
+def test_stored_agenda_is_preferred_to_demo_when_no_provider_is_configured(
+    monkeypatch,
+) -> None:
+    stored = _external_match(fixture_id="historical-1002").model_copy(
+        update={"source_provider": "historical-football-data"}
+    )
+    monkeypatch.setattr(matches_service, "_provider_chain", lambda: [])
+    monkeypatch.setattr(matches_service, "load_stored_matches", MagicMock(return_value=[stored]))
+    demo = MagicMock(side_effect=AssertionError("stored data must win over demo data"))
+    monkeypatch.setattr(matches_service.mock_provider, "list_highlights", demo)
+
+    result = matches_service.get_highlights_result(SELECTED_DATE)
+
+    assert result.matches == [stored]
+    assert result.source == "database"
+    demo.assert_not_called()
+
+
+def test_live_agenda_uses_short_cache_ttl(
+    monkeypatch,
+    external_provider: APIFootballProvider,
+) -> None:
+    clock = {"now": 100.0}
+    live_fixture = _external_match().model_copy(
+        update={
+            "status": "EN JUEGO (2T)",
+            "status_short": "2H",
+            "elapsed": 62,
+            "home_score": 1,
+            "away_score": 0,
+        }
+    )
+    list_fixtures = MagicMock(return_value=[live_fixture])
+    monkeypatch.setattr(matches_service.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(external_provider, "list_fixtures", list_fixtures)
+
+    assert matches_service.get_highlights(SELECTED_DATE) == [live_fixture]
+    clock["now"] += matches_service._LIVE_FIXTURE_CACHE_TTL_SECONDS - 1
+    assert matches_service.get_highlights(SELECTED_DATE) == [live_fixture]
+    assert list_fixtures.call_count == 1
+
+    clock["now"] += 2
+    assert matches_service.get_highlights(SELECTED_DATE) == [live_fixture]
+    assert list_fixtures.call_count == 2
 
 
 def test_external_failure_returns_stale_real_fixtures_never_mock(

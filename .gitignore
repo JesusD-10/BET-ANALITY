@@ -10,3 +10,6 @@ __pycache__/
 coverage/
 dist/
 *.py[cod]
+*.db
+*.sqlite
+*.sqlite3

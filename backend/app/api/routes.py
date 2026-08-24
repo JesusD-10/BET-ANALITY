@@ -6,8 +6,10 @@ from threading import Lock
 import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
-from app.schemas.health import HealthResponse
+from app.db.health import database_is_ready
+from app.schemas.health import DatabaseHealthResponse, HealthResponse
 from app.schemas.matches import AssistantQuestion, AssistantResponse, MatchAnalysisResponse, MatchListResponse, RecommendationResponse
 from app.services.ai_gateway import ai_gateway
 from app.services.matches import (
@@ -16,6 +18,7 @@ from app.services.matches import (
     get_assistant_analysis_context,
     get_dream_recommendations,
     get_highlights_result,
+    get_live_matches_result,
     get_recommendations,
     search_matches_result,
 )
@@ -138,6 +141,33 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok", service="bet-analizador-api")
 
 
+@router.get(
+    "/health/database",
+    response_model=DatabaseHealthResponse,
+    responses={503: {"model": DatabaseHealthResponse}},
+    tags=["system"],
+)
+def database_health() -> DatabaseHealthResponse | JSONResponse:
+    try:
+        ready = database_is_ready()
+    except Exception:
+        # Defensive boundary: even an unexpected checker failure must not put
+        # connection strings, hosts, usernames, or driver details on the wire.
+        ready = False
+    if ready:
+        return DatabaseHealthResponse(
+            status="ready",
+            connection="ok",
+            schema="complete",
+        )
+    unavailable = DatabaseHealthResponse(
+        status="unavailable",
+        connection="unavailable",
+        schema="unavailable",
+    )
+    return JSONResponse(status_code=503, content=unavailable.model_dump(by_alias=True))
+
+
 @router.get("/matches/highlights", response_model=MatchListResponse, tags=["matches"])
 def highlights(match_date: date | None = Query(default=None)) -> MatchListResponse:
     result = get_highlights_result(match_date)
@@ -149,9 +179,23 @@ def highlights(match_date: date | None = Query(default=None)) -> MatchListRespon
     )
 
 
+@router.get("/matches/live", response_model=MatchListResponse, tags=["matches"])
+def live_matches(match_date: date | None = Query(default=None)) -> MatchListResponse:
+    result = get_live_matches_result(match_date)
+    return MatchListResponse(
+        date=result.date,
+        matches=result.matches,
+        source=result.source,
+        notice=result.notice,
+    )
+
+
 @router.get("/matches/search", response_model=MatchListResponse, tags=["matches"])
-def search(q: str | None = Query(default=None, max_length=120)) -> MatchListResponse:
-    result = search_matches_result(q)
+def search(
+    q: str | None = Query(default=None, max_length=120),
+    match_date: date | None = Query(default=None),
+) -> MatchListResponse:
+    result = search_matches_result(q, match_date)
     return MatchListResponse(
         date=result.date,
         matches=result.matches,

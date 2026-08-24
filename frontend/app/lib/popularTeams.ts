@@ -154,13 +154,20 @@ export function isPopularMatch(match: Match): boolean {
 
 export function isCurrentOrUpcomingMatch(match: Match, nowMs = Date.now()): boolean {
   const status = normalizeFootballName(match.status);
-  if (["en juego", "en pausa", "retrasado"].includes(status)) return true;
-  if ([
-    "finalizado",
-    "cancelado",
-    "suspendido",
-    "eliminado",
-  ].includes(status)) return false;
+  const statusShort = (match.status_short ?? "").trim().toUpperCase();
+  if (
+    ["1H", "HT", "2H", "BT", "ET", "P", "LIVE", "IN_PLAY", "PAUSED"].includes(statusShort) ||
+    status.startsWith("en juego") ||
+    ["en pausa", "entretiempo", "descanso", "tiempo extra", "penales", "retrasado"].some(
+      (liveStatus) => status.includes(liveStatus),
+    )
+  ) return true;
+  if (
+    ["FT", "AET", "PEN", "AWD", "WO", "PST", "CANC", "ABD", "SUSP", "INT"].includes(statusShort) ||
+    ["finalizado", "cancelado", "suspendido", "eliminado", "pospuesto", "interrumpido"].some(
+      (closedStatus) => status.includes(closedStatus),
+    )
+  ) return false;
   const kickoffMs = new Date(match.kickoff_at).getTime();
   return Number.isFinite(kickoffMs) && kickoffMs >= nowMs;
 }

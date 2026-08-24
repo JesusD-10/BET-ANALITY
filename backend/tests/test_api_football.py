@@ -58,6 +58,42 @@ def test_list_fixtures_mapping(mock_get):
     }
 
 
+def test_live_fixture_mapping_keeps_score_clock_and_provider_status() -> None:
+    provider = APIFootballProvider(key="dummy_key")
+
+    match = provider._to_match_summary(
+        {
+            "fixture": {
+                "id": 1002,
+                "date": "2026-08-07T20:00:00+00:00",
+                "status": {"short": "2H", "long": "Second Half", "elapsed": 63},
+            },
+            "league": {
+                "id": 239,
+                "name": "Liga 1",
+                "country": "Peru",
+                "country_code": "PE",
+                "logo": "https://img.test/liga-1.png",
+            },
+            "teams": {
+                "home": {"id": 10, "name": "Alianza Lima"},
+                "away": {"id": 12, "name": "Universitario"},
+            },
+            "goals": {"home": 2, "away": 1},
+            "score": {"halftime": {"home": 1, "away": 1}},
+        }
+    )
+
+    assert match.country == "Peru"
+    assert match.country_code == "PE"
+    assert match.competition_logo == "https://img.test/liga-1.png"
+    assert (match.home_score, match.away_score) == (2, 1)
+    assert (match.halftime_home_score, match.halftime_away_score) == (1, 1)
+    assert match.elapsed == 63
+    assert match.status_short == "2H"
+    assert match.status == "EN JUEGO (2T)"
+
+
 @patch("httpx.get")
 def test_request_treats_http_204_as_an_empty_valid_response(mock_get):
     mock_response = MagicMock(status_code=204)
@@ -209,6 +245,7 @@ def test_get_head_to_head(mock_get):
     assert mock_get.call_args.kwargs["params"] == {
         "h2h": "10-12",
         "last": "5",
+        "status": "FT-AET-PEN",
     }
 
 

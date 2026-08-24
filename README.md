@@ -33,6 +33,7 @@ BET_ANALIZADOR/
 │   ├── app/
 │   │   ├── api/        # Rutas y controladores REST (FastAPI)
 │   │   ├── core/       # Configuración global y variables de entorno
+│   │   ├── db/         # PostgreSQL/SQLite, importador histórico y catálogos
 │   │   ├── schemas/    # Modelos de datos Pydantic
 │   │   └── services/   # Tres APIs deportivas, orquestador multi-IA y motor analítico
 │   └── tests/          # Suite de pruebas unitarias e integración (pytest)
@@ -66,6 +67,8 @@ Crea el archivo `.env.development.local` en la raíz del proyecto basándote en 
 ```env
 APP_ENV=development
 DEBUG=true
+NEXT_PUBLIC_LIVE_REFRESH_SECONDS=15
+NEXT_PUBLIC_IDLE_REFRESH_SECONDS=45
 
 # Motor multi-IA. Con las cuatro claves, las cuatro IAs interpretan el partido
 # en paralelo y el backend agrega las selecciones que alcanzan consenso.
@@ -91,6 +94,9 @@ OPENROUTER_API_KEY=
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=openrouter/free
 OPENROUTER_SITE_URL=https://bet-anality-1.onrender.com
+
+# En Render usa la Internal Database URL del PostgreSQL.
+DATABASE_URL=sqlite:///./bet_analizador.db
 
 # API-SPORTS / API-Football (conexión directa, no RapidAPI)
 # También se acepta el alias api-sports
@@ -210,6 +216,81 @@ detalle analítico. El backend usa 10 s para API-Football, 15 s para Sportmonks,
 10 s para Football-Data.org y un presupuesto de ruta deportiva de 40 s. Las
 cuatro IAs comparten un plazo de 22 s y se ejecutan en paralelo, por lo que sus
 tiempos no se suman.
+
+La agenda refresca cada 15 s cuando detecta un partido en vivo y cada 45 s el
+resto del día; se pausa al ocultar la pestaña y no hace polling en otras fechas.
+Los intervalos se pueden aumentar con `NEXT_PUBLIC_LIVE_REFRESH_SECONDS` y
+`NEXT_PUBLIC_IDLE_REFRESH_SECONDS`. El plan Free actual de API-Football ofrece
+100 solicitudes diarias, por lo que sirve para desarrollo pero no puede sostener
+un marcador público a 15 segundos; para producción se necesita un plan/cuota
+acorde al tráfico o intervalos mayores.
+
+---
+
+## 🗄️ PostgreSQL, resultados históricos y catálogos
+
+El backend usa el mismo esquema normalizado en PostgreSQL (Render) y SQLite
+(desarrollo local). Incluye países, competiciones, temporadas, clubes,
+jugadores, plantillas por temporada, partidos, estadísticas por equipo, cuotas
+e historial de importaciones. La agenda persiste cada respuesta real y usa la
+base como respaldo cuando un proveedor no cubre una fecha o está caído.
+
+### Desarrollo local
+
+Desde `backend` crea las tablas, valida primero los archivos sin escribir y
+después importa de forma idempotente:
+
+```bash
+python -m app.db.init_db
+python -m app.db.import_historical "../Base de datos"
+python -m app.db.import_historical "../Base de datos" --commit
+```
+
+Sin `--commit`, el importador siempre funciona como *dry run*. Repetir el
+último comando no duplica encuentros, estadísticas ni cuotas. Los ZIP no se
+extraen automáticamente porque necesitan un esquema de origen conocido.
+
+### Crear PostgreSQL en Render
+
+1. En el Dashboard usa **New → Postgres**, elige la misma región del backend y
+   espera el estado `Available`.
+2. Copia la **Internal Database URL** y agrégala como `DATABASE_URL` únicamente
+   en el servicio backend. Nunca uses una variable `NEXT_PUBLIC_*` para ella.
+3. Despliega de nuevo el backend. El arranque crea de forma idempotente las
+   tablas. En el plan Free, que no incluye Shell, abre
+   `https://TU-BACKEND.onrender.com/api/v1/health/database`: una base preparada
+   responde HTTP 200 con `{"status":"ready","connection":"ok","schema":"complete"}`.
+4. Para cargar los Excel locales sin subirlos a Git, conecta temporalmente tu
+   terminal a la **External Database URL** y ejecuta el importador desde
+   `backend`. En PowerShell:
+
+```powershell
+$env:DATABASE_URL = "PEGA_AQUI_LA_EXTERNAL_DATABASE_URL"
+python -m app.db.init_db
+python -m app.db.import_historical "..\Base de datos" --commit
+Remove-Item Env:DATABASE_URL
+```
+
+Cuando termine, restringe o desactiva el acceso externo de PostgreSQL. El
+backend desplegado debe conservar la URL interna. Render recomienda ubicar base
+y servicio en la misma región y usar siempre la conexión privada cuando ambos
+corren allí.
+
+Los Excel históricos no incluyen fichas completas ni imágenes. Clubes, escudos,
+jugadores y fotos deben sincronizarse desde API-Football o Sportmonks según la
+cobertura y licencia del plan; no se deben extraer de SofaScore, Flashscore o
+365Scores. Las URL de imagen se guardan como metadatos, no los archivos binarios.
+Con `API_FOOTBALL_KEY` configurada, una competición se sincroniza así:
+
+```bash
+python -m app.db.sync_catalog --league-id 39 --season 2026 --competition-name "Premier League" --country "England" --country-code GB --dry-run
+python -m app.db.sync_catalog --league-id 39 --season 2026 --competition-name "Premier League" --country "England" --country-code GB
+```
+
+El primer comando valida y revierte; el segundo guarda. Cada plantilla consume
+una consulta adicional, por lo que conviene sincronizar liga por liga y vigilar
+la cuota reportada por el propio comando. `--team-id` limita la operación a un
+club cuando se necesita una actualización puntual.
 
 ---
 

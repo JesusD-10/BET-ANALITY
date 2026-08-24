@@ -70,6 +70,8 @@ class APIFootballProvider:
     provider_name = "api-football"
     _ODDS_CACHE_TTL_SECONDS = 3 * 60 * 60
     _ODDS_EMPTY_CACHE_TTL_SECONDS = 15 * 60
+    _LIVE_FIXTURE_CACHE_TTL_SECONDS = 15
+    _LIVE_STATUS_SHORTS = {"1H", "HT", "2H", "BT", "ET", "P", "LIVE"}
 
     # Static catalogues are intentionally long-lived. Match-dependent data is
     # short-lived so it can be refreshed without repeatedly spending quota.
@@ -190,6 +192,12 @@ class APIFootballProvider:
         key = self._request_key(endpoint, clean_params)
         cached = self._response_cache.get(key)
         effective_ttl = self._CACHE_TTLS.get(endpoint.lstrip("/"), 5 * 60) if ttl is None else max(0, ttl)
+        if (
+            cached is not None
+            and endpoint.lstrip("/") == "fixtures"
+            and self._fixture_envelope_is_live(cached[1])
+        ):
+            effective_ttl = min(effective_ttl, self._LIVE_FIXTURE_CACHE_TTL_SECONDS)
         if cached is not None and time.monotonic() - cached[0] <= effective_ttl:
             return deepcopy(cached[1])
 
@@ -204,6 +212,20 @@ class APIFootballProvider:
             raise
         self._response_cache[key] = (time.monotonic(), deepcopy(payload))
         return deepcopy(payload)
+
+    @classmethod
+    def _fixture_envelope_is_live(cls, payload: dict) -> bool:
+        response = payload.get("response")
+        if not isinstance(response, list):
+            return False
+        for item in response:
+            if not isinstance(item, dict):
+                continue
+            fixture = item.get("fixture") if isinstance(item.get("fixture"), dict) else {}
+            status = fixture.get("status") if isinstance(fixture.get("status"), dict) else {}
+            if str(status.get("short") or "").upper() in cls._LIVE_STATUS_SHORTS:
+                return True
+        return False
 
     def _get_headers(self) -> dict[str, str]:
         if self.is_rapidapi:
@@ -358,12 +380,27 @@ class APIFootballProvider:
             )
         return deepcopy(response)
 
+    @staticmethod
+    def _score_int(value: object) -> int | None:
+        """Return a non-negative scoreboard value without trusting provider types."""
+
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
     def _to_match_summary(self, item: dict) -> MatchSummary:
         fixture = item.get("fixture") or {}
         league = item.get("league") or {}
         teams = item.get("teams") or {}
         home = teams.get("home") or {}
         away = teams.get("away") or {}
+        goals = item.get("goals") if isinstance(item.get("goals"), dict) else {}
+        score = item.get("score") if isinstance(item.get("score"), dict) else {}
+        halftime = score.get("halftime") if isinstance(score.get("halftime"), dict) else {}
 
         raw_fixture_id = fixture.get("id")
         if raw_fixture_id is None:
@@ -377,12 +414,16 @@ class APIFootballProvider:
 
         home_team_id = str(home["id"]) if home.get("id") is not None else None
         away_team_id = str(away["id"]) if away.get("id") is not None else None
-        status_short = (fixture.get("status") or {}).get("short", "NS")
+        raw_status = fixture.get("status") if isinstance(fixture.get("status"), dict) else {}
+        status_short = str(raw_status.get("short") or "NS").upper()
 
         return MatchSummary(
             id=f"api-football-{fixture_id}",
             external_id=fixture_id,
             competition=league.get("name") or "Competición",
+            country=league.get("country"),
+            country_code=league.get("country_code") or league.get("countryCode"),
+            competition_logo=league.get("logo"),
             league_id=str(league["id"]) if league.get("id") is not None else None,
             season=league.get("season"),
             round=str(league.get("round")) if league.get("round") is not None else None,
@@ -404,6 +445,12 @@ class APIFootballProvider:
             # Fixtures do not include bookmaker quotes. A future odds provider
             # can flip this flag only after prices are actually retrieved.
             odds_available=False,
+            home_score=self._score_int(goals.get("home")),
+            away_score=self._score_int(goals.get("away")),
+            halftime_home_score=self._score_int(halftime.get("home")),
+            halftime_away_score=self._score_int(halftime.get("away")),
+            elapsed=self._score_int(raw_status.get("elapsed")),
+            status_short=status_short,
             status=self._normalize_status(status_short),
             source_provider=self.provider_name,
             source_url=f"{self.base_url}/fixtures?id={fixture_id}",

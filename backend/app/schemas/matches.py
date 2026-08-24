@@ -73,6 +73,9 @@ class H2HMatchItem(BaseModel):
 class MatchSummary(BaseModel):
     id: str
     competition: str
+    country: str | None = None
+    country_code: str | None = None
+    competition_logo: str | None = None
     kickoff_at: datetime
     home_team: str
     away_team: str
@@ -90,6 +93,12 @@ class MatchSummary(BaseModel):
     away_logo: str | None = None
     data_quality: float = Field(default=0.9, ge=0, le=1)
     odds_available: bool = False
+    home_score: int | None = Field(default=None, ge=0)
+    away_score: int | None = Field(default=None, ge=0)
+    halftime_home_score: int | None = Field(default=None, ge=0)
+    halftime_away_score: int | None = Field(default=None, ge=0)
+    elapsed: int | None = Field(default=None, ge=0)
+    status_short: str | None = None
     status: str
     source_provider: str = "mock"
     source_url: str | None = None
@@ -309,6 +318,14 @@ class CombinationAnalysis(BaseModel):
     kind: str = "combination"
 
 
+class AIAssignedForecast(BaseModel):
+    yellow_cards: int | None = None
+    corners: int | None = None
+    btts: str | None = None  # "Sí" / "No"
+    winner: str | None = None  # nombre de equipo o "Empate"
+    probabilities: dict[str, float] = Field(default_factory=dict)
+
+
 class MatchAnalysisResponse(BaseModel):
     match: MatchSummary
     model_version: str
@@ -333,6 +350,9 @@ class MatchAnalysisResponse(BaseModel):
     markets: list[MarketAnalysis]
     combinations: list[CombinationAnalysis] = Field(default_factory=list)
     dream_picks: list[CombinationAnalysis] = Field(default_factory=list)
+    ai_forecast: AIAssignedForecast | None = None
+    result_probability_matrix: list[list[float]] | None = None
+    ai_analysis_sections: dict[str, str] | None = None
     notes: list[str]
 
 

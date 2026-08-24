@@ -303,6 +303,9 @@ export type H2HMatch = {
 export type Match = {
   id: string;
   competition: string;
+  country?: string | null;
+  country_code?: string | null;
+  competition_logo?: string | null;
   kickoff_at: string;
   home_team: string;
   away_team: string;
@@ -319,9 +322,22 @@ export type Match = {
   data_quality: number;
   odds_available: boolean;
   status: string;
+  status_short?: string | null;
+  elapsed?: number | null;
+  home_score?: number | null;
+  away_score?: number | null;
+  halftime_home_score?: number | null;
+  halftime_away_score?: number | null;
   source_provider?: string;
   source_url?: string | null;
   external_id?: string | null;
+};
+
+export type MatchListResponse = {
+  date?: string;
+  matches: Match[];
+  source: string;
+  notice: string | null;
 };
 
 export type Market = {
@@ -410,13 +426,33 @@ export type Recommendation = {
   away_logo?: string | null;
 };
 
-export async function getMatches(query = "", signal?: AbortSignal) {
-  const response = await apiFetch(`${apiUrl}/matches/search?q=${encodeURIComponent(query)}`, {
+export function getMatches(query?: string, signal?: AbortSignal): Promise<MatchListResponse>;
+export function getMatches(
+  query: string,
+  matchDate: string | undefined,
+  signal?: AbortSignal,
+): Promise<MatchListResponse>;
+export async function getMatches(
+  query = "",
+  matchDateOrSignal?: string | AbortSignal,
+  signal?: AbortSignal,
+): Promise<MatchListResponse> {
+  const matchDate = typeof matchDateOrSignal === "string" ? matchDateOrSignal : undefined;
+  const requestSignal =
+    typeof matchDateOrSignal === "string" || matchDateOrSignal === undefined
+      ? signal
+      : matchDateOrSignal;
+  const params = new URLSearchParams();
+  if (query.trim()) params.set("q", query.trim());
+  if (matchDate) params.set("match_date", matchDate);
+  const requestUrl = `${apiUrl}/matches/search${params.size ? `?${params.toString()}` : ""}`;
+
+  const response = await apiFetch(requestUrl, {
     cache: "no-store",
-    signal,
+    signal: requestSignal,
   });
   if (!response.ok) await throwApiError(response, "No se pudo cargar la agenda");
-  return response.json() as Promise<{ matches: Match[]; source: string; notice: string | null }>;
+  return response.json() as Promise<MatchListResponse>;
 }
 
 export async function getAnalysis(id: string, signal?: AbortSignal) {

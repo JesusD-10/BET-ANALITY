@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.core.config import settings
+from app.db import load_matches as load_stored_matches
+from app.db import persist_matches as persist_stored_matches
 from app.schemas.matches import (
     DisciplineSummary,
     H2HMatchItem,
@@ -244,8 +246,12 @@ class FootballDataProvider:
 
     def _to_match(self, item: dict, endpoint: str) -> MatchSummary:
         competition = item.get("competition") or {}
+        area = item.get("area") or competition.get("area") or {}
         home = item.get("homeTeam") or {}
         away = item.get("awayTeam") or {}
+        score = item.get("score") if isinstance(item.get("score"), dict) else {}
+        full_time = score.get("fullTime") if isinstance(score.get("fullTime"), dict) else {}
+        half_time = score.get("halfTime") if isinstance(score.get("halfTime"), dict) else {}
         referees = item.get("referees") or []
         referee_name = referees[0].get("name") if referees and isinstance(referees, list) else None
 
@@ -256,6 +262,13 @@ class FootballDataProvider:
             id=f"football-data-{item['id']}",
             external_id=str(item["id"]),
             competition=competition.get("name") or "Competición sin nombre",
+            country=area.get("name") if isinstance(area, dict) else None,
+            country_code=(
+                str(area.get("code"))
+                if isinstance(area, dict) and area.get("code")
+                else None
+            ),
+            competition_logo=competition.get("emblem"),
             kickoff_at=kickoff,
             home_team=home.get("name") or "Equipo local",
             away_team=away.get("name") or "Equipo visitante",
@@ -266,6 +279,12 @@ class FootballDataProvider:
             referee=referee_name,
             data_quality=0.92,
             odds_available=False,
+            home_score=self._optional_nonnegative_int(full_time.get("home")),
+            away_score=self._optional_nonnegative_int(full_time.get("away")),
+            halftime_home_score=self._optional_nonnegative_int(half_time.get("home")),
+            halftime_away_score=self._optional_nonnegative_int(half_time.get("away")),
+            elapsed=self._optional_nonnegative_int(item.get("minute")),
+            status_short=str(item.get("status") or "UNKNOWN").upper(),
             status=self._normalize_status(item.get("status", "")),
             source_provider=self.provider_name,
             source_url=endpoint,
@@ -273,8 +292,20 @@ class FootballDataProvider:
 
     @staticmethod
     def _is_relevant_match(item: dict) -> bool:
-        status = (item.get("status") or "").upper()
-        return status not in {"FINISHED", "POSTPONED", "SUSPENDED", "CANCELLED"}
+        # The scoreboard must retain completed and interrupted fixtures so a
+        # selected historical date renders the actual result instead of an
+        # empty agenda. Only structurally unusable records are skipped.
+        return bool(item.get("id") is not None and item.get("utcDate"))
+
+    @staticmethod
+    def _optional_nonnegative_int(value: object) -> int | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
 
     @staticmethod
     def _normalize_status(status: str) -> str:
@@ -326,6 +357,7 @@ class FixtureResult:
 
 
 _FIXTURE_CACHE_TTL_SECONDS = 60
+_LIVE_FIXTURE_CACHE_TTL_SECONDS = 15
 _FIXTURE_STALE_TTL_SECONDS = 15 * 60
 _MATCH_INDEX_TTL_SECONDS = 12 * 60 * 60
 _PROVIDER_RETRY_COOLDOWN_SECONDS = 10
@@ -362,6 +394,57 @@ def _cache_get(cache: dict, key: object, ttl: int):
 
 def _cache_set(cache: dict, key: object, value: object) -> None:
     cache[key] = (time.monotonic(), value)
+
+
+_LIVE_STATUS_SHORTS = {
+    "1H",
+    "HT",
+    "2H",
+    "BT",
+    "ET",
+    "P",
+    "LIVE",
+    "IN_PLAY",
+    "PAUSED",
+    "INPLAY_1ST_HALF",
+    "INPLAY_2ND_HALF",
+    "INPLAY_ET",
+    "INPLAY_PENALTIES",
+    "BREAK",
+    "EXTRA_TIME_BREAK",
+    "PEN_BREAK",
+}
+
+
+def _is_live_match(match: MatchSummary) -> bool:
+    status_short = str(match.status_short or "").strip().upper()
+    if status_short in _LIVE_STATUS_SHORTS:
+        return True
+    normalized = " ".join(str(match.status or "").upper().split())
+    return normalized.startswith("EN JUEGO") or normalized in {
+        "EN PAUSA",
+        "ENTRETIEMPO",
+        "DESCANSO",
+        "TIEMPO EXTRA",
+        "PENALES",
+    }
+
+
+def _fixture_cache_get(key: str) -> FixtureResult | None:
+    cached = _fixture_cache.get(key)
+    if cached is None:
+        return None
+    stored_at, result = cached
+    if not isinstance(result, FixtureResult):
+        return None
+    ttl = (
+        _LIVE_FIXTURE_CACHE_TTL_SECONDS
+        if any(_is_live_match(match) for match in result.matches)
+        else _FIXTURE_CACHE_TTL_SECONDS
+    )
+    if time.monotonic() - stored_at > ttl:
+        return None
+    return result
 
 
 def _get_cached_analysis(
@@ -408,6 +491,45 @@ def _index_matches(matches: list[MatchSummary]) -> None:
     stored_at = time.monotonic()
     for match in matches:
         _fixture_by_id[match.id] = (stored_at, match)
+
+
+def _persist_real_matches(matches: list[MatchSummary]) -> None:
+    """Store provider fixtures without making database failures break livescores."""
+
+    real_matches = [match for match in matches if match.source_provider != "mock"]
+    if not real_matches:
+        return
+    try:
+        persist_stored_matches(real_matches)
+    except Exception:
+        logger.exception("No se pudo persistir la agenda real en la base de datos.")
+
+
+def _stored_fixture_result(
+    selected_date: date,
+    *,
+    notice: str,
+) -> FixtureResult | None:
+    """Return the durable agenda for a date when upstream data is unavailable."""
+
+    try:
+        matches = load_stored_matches(selected_date)
+    except Exception:
+        logger.exception(
+            "No se pudo consultar la agenda persistida para %s.",
+            selected_date.isoformat(),
+        )
+        return None
+    if not matches:
+        return None
+    result = FixtureResult(
+        date=selected_date,
+        matches=matches,
+        source="database",
+        notice=notice,
+    )
+    _index_matches(matches)
+    return result
 
 
 def _active_provider():
@@ -612,12 +734,22 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
     providers = _provider_chain()
     route_deadline = time.monotonic() + settings.sports_data_total_timeout_seconds
     route_cache_key = _route_cache_key(providers, selected_date)
-    cached = _cache_get(_fixture_cache, route_cache_key, _FIXTURE_CACHE_TTL_SECONDS)
+    cached = _fixture_cache_get(route_cache_key)
     if cached is not None:
         _index_matches(cached.matches)
         return cached
 
     if not providers:
+        stored = _stored_fixture_result(
+            selected_date,
+            notice=(
+                "No hay un proveedor deportivo configurado; se muestra la agenda "
+                "guardada en la base de datos."
+            ),
+        )
+        if stored is not None:
+            _cache_set(_fixture_cache, route_cache_key, stored)
+            return stored
         matches = mock_provider.list_highlights(selected_date)
         result = FixtureResult(
             date=selected_date,
@@ -634,11 +766,7 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
     for provider in providers:
         source = _provider_name(provider)
         provider_cache_key = _provider_cache_key(provider, selected_date)
-        provider_cached = _cache_get(
-            _fixture_cache,
-            provider_cache_key,
-            _FIXTURE_CACHE_TTL_SECONDS,
-        )
+        provider_cached = _fixture_cache_get(provider_cache_key)
         if provider_cached is not None:
             if not provider_cached.matches:
                 empty_sources.append(provider_cached.source)
@@ -743,6 +871,7 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
         # Provider cache is route-neutral. A failover notice belongs only to
         # the route that experienced the failure, otherwise Football-Data used
         # later as primary would falsely retain an API-Football outage notice.
+        _persist_real_matches(matches)
         _cache_set(_fixture_cache, route_cache_key, result)
         _index_matches(matches)
         return result
@@ -754,6 +883,16 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
         if failed_sources:
             observations.append(f"{', '.join(failed_sources)} no respondió")
         observations.append(f"{', '.join(empty_sources)} no devolvió partidos")
+        stored = _stored_fixture_result(
+            selected_date,
+            notice=(
+                f"{'; '.join(observations)}. Se muestra la agenda histórica o "
+                "sincronizada guardada en la base de datos."
+            ),
+        )
+        if stored is not None:
+            _cache_set(_fixture_cache, route_cache_key, stored)
+            return stored
         result = FixtureResult(
             date=selected_date,
             matches=[],
@@ -782,6 +921,17 @@ def _get_highlights_result_once(match_date: date | None = None) -> FixtureResult
         _index_matches(result.matches)
         return result
 
+    stored = _stored_fixture_result(
+        selected_date,
+        notice=(
+            "Los proveedores de partidos no respondieron; se muestra la última "
+            "agenda guardada en la base de datos."
+        ),
+    )
+    if stored is not None:
+        _cache_set(_fixture_cache, route_cache_key, stored)
+        return stored
+
     source = _provider_name(providers[0])
     return FixtureResult(
         date=selected_date,
@@ -800,7 +950,7 @@ def get_highlights_result(match_date: date | None = None) -> FixtureResult:
     selected_date = match_date or datetime.now(SPORTS_TIMEZONE).date()
     providers = _provider_chain()
     route_cache_key = _route_cache_key(providers, selected_date)
-    cached = _cache_get(_fixture_cache, route_cache_key, _FIXTURE_CACHE_TTL_SECONDS)
+    cached = _fixture_cache_get(route_cache_key)
     if cached is not None:
         _index_matches(cached.matches)
         return cached
@@ -814,8 +964,23 @@ def get_highlights(match_date: date | None = None) -> list[MatchSummary]:
     return get_highlights_result(match_date).matches
 
 
-def search_matches_result(query: str | None = None) -> FixtureResult:
-    result = get_highlights_result()
+def get_live_matches_result(match_date: date | None = None) -> FixtureResult:
+    """Return only fixtures that are currently playing or temporarily paused."""
+
+    result = get_highlights_result(match_date)
+    return FixtureResult(
+        date=result.date,
+        matches=[match for match in result.matches if _is_live_match(match)],
+        source=result.source,
+        notice=result.notice,
+    )
+
+
+def search_matches_result(
+    query: str | None = None,
+    match_date: date | None = None,
+) -> FixtureResult:
+    result = get_highlights_result(match_date)
     if not query:
         return result
     needle = query.casefold().strip()
@@ -827,8 +992,11 @@ def search_matches_result(query: str | None = None) -> FixtureResult:
     return FixtureResult(date=result.date, matches=matches, source=result.source, notice=result.notice)
 
 
-def search_matches(query: str | None = None) -> list[MatchSummary]:
-    return search_matches_result(query).matches
+def search_matches(
+    query: str | None = None,
+    match_date: date | None = None,
+) -> list[MatchSummary]:
+    return search_matches_result(query, match_date).matches
 
 
 

@@ -29,8 +29,8 @@ class SportmonksProvider:
     provider_name = "sportmonks"
     # Date listings only need relations required to render the agenda.
     # Optional venue/official data belongs to the fixture detail request.
-    _AGENDA_INCLUDES = "participants;league;state"
-    _DETAIL_INCLUDES = "participants;league;state;venue;referees.type"
+    _AGENDA_INCLUDES = "participants;league.country;state;scores"
+    _DETAIL_INCLUDES = "participants;league.country;state;scores;venue;referees.type"
     _H2H_INCLUDES = "participants;league;state;scores"
     _HISTORY_INCLUDES = "participants;league;state;scores;statistics"
     # Official fixture statistic type IDs used by the betting taxonomy:
@@ -356,12 +356,45 @@ class SportmonksProvider:
         league = item.get("league") or {}
         state = item.get("state") or {}
         venue = item.get("venue") or {}
+        country = league.get("country") if isinstance(league, dict) else None
+        country_name = (
+            country.get("name")
+            if isinstance(country, dict)
+            else country if isinstance(country, str) else None
+        )
+        country_code = None
+        if isinstance(country, dict):
+            country_code = (
+                country.get("iso2")
+                or country.get("iso3")
+                or country.get("code")
+            )
+        raw_state = (
+            state.get("state")
+            or state.get("developer_name")
+            or state.get("short_name")
+            or state.get("name")
+        )
+        status_short = "_".join(str(raw_state or "UNKNOWN").upper().split())
+        current_score = self._current_score(item.get("scores"), home, away)
+        halftime_score = self._score_for_descriptions(
+            item.get("scores"),
+            home,
+            away,
+            {"1ST_HALF", "FIRST_HALF", "HALF_TIME", "HT"},
+        )
+        raw_elapsed = item.get("minute")
+        if raw_elapsed is None and isinstance(state, dict):
+            raw_elapsed = state.get("minute")
         referee_name = self._referee_name(item.get("referees"))
         fixture_id = str(raw_fixture_id)
         return MatchSummary(
             id=f"sportmonks-{fixture_id}",
             external_id=fixture_id,
             competition=league.get("name") or "Competición",
+            country=country_name,
+            country_code=str(country_code) if country_code else None,
+            competition_logo=league.get("image_path"),
             kickoff_at=kickoff,
             home_team=home_name,
             away_team=away_name,
@@ -373,13 +406,17 @@ class SportmonksProvider:
             referee=referee_name,
             data_quality=0.96,
             odds_available=bool(item.get("has_odds")),
-            status=self._normalize_status(
-                state.get("state")
-                or state.get("developer_name")
-                or state.get("short_name")
-                or state.get("name"),
-                item.get("state_id"),
+            home_score=current_score[0] if current_score is not None else None,
+            away_score=current_score[1] if current_score is not None else None,
+            halftime_home_score=(
+                halftime_score[0] if halftime_score is not None else None
             ),
+            halftime_away_score=(
+                halftime_score[1] if halftime_score is not None else None
+            ),
+            elapsed=self._optional_nonnegative_int(raw_elapsed),
+            status_short=status_short,
+            status=self._normalize_status(raw_state, item.get("state_id")),
             source_provider=self.provider_name,
             source_url=f"{self.base_url}/fixtures/{fixture_id}",
         )
@@ -513,21 +550,55 @@ class SportmonksProvider:
         return None
 
     @staticmethod
+    def _optional_nonnegative_int(value: object) -> int | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
+    @classmethod
     def _current_score(
+        cls,
         raw_scores: object,
         home: dict,
         away: dict,
     ) -> tuple[int, int] | None:
+        return cls._score_for_descriptions(
+            raw_scores,
+            home,
+            away,
+            {"CURRENT"},
+        )
+
+    @staticmethod
+    def _score_for_descriptions(
+        raw_scores: object,
+        home: dict,
+        away: dict,
+        descriptions: set[str],
+    ) -> tuple[int, int] | None:
         if not isinstance(raw_scores, list):
             return None
+        accepted = {
+            "_".join(str(description).replace("-", " ").upper().split())
+            for description in descriptions
+        }
         by_location: dict[str, int] = {}
         home_id = str(home.get("id"))
         away_id = str(away.get("id"))
         for score_item in raw_scores:
-            if (
-                not isinstance(score_item, dict)
-                or str(score_item.get("description") or "").upper() != "CURRENT"
-            ):
+            if not isinstance(score_item, dict):
+                continue
+            description = "_".join(
+                str(score_item.get("description") or "")
+                .replace("-", " ")
+                .upper()
+                .split()
+            )
+            if description not in accepted:
                 continue
             score = score_item.get("score") or {}
             goals = score.get("goals") if isinstance(score, dict) else None
