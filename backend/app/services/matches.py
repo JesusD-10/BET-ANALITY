@@ -1562,11 +1562,9 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
                 if lineups_requested
                 else None
             )
-            odds_future = (
-                executor.submit(provider.get_fixture_odds, fixture_id)
-                if odds_request_allowed and odds_supported
-                else None
-            )
+            # The product models probabilities from sporting evidence stored
+            # in the database; bookmaker prices are deliberately excluded.
+            odds_future = None
             h2h_future = None
             home_future = None
             away_future = None

@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.db.audit_database import audit_database
 from app.db.import_historical import DEFAULT_DATA_PATH, ImportReport, import_historical
 from app.db.init_db import init_database
+from app.db.models import MatchOdds
 from app.db.session import engine
 
 
@@ -35,6 +36,7 @@ def load_postgres(
     minimum_matches: int = 274_000,
     audit: bool = True,
     include_odds: bool = True,
+    purge_odds: bool = False,
 ) -> tuple[ImportReport, dict[str, object] | None]:
     """Load historical sources into the PostgreSQL selected by DATABASE_URL.
 
@@ -51,6 +53,9 @@ def load_postgres(
         connection.execute(text("SELECT 1"))
 
     init_database()
+    if purge_odds:
+        with engine.begin() as connection:
+            connection.execute(text(f"DELETE FROM {MatchOdds.__tablename__}"))
     report = import_historical(
         source_path,
         dry_run=False,
@@ -79,12 +84,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--progress-every", type=int, default=10_000)
     parser.add_argument("--minimum-matches", type=int, default=274_000)
     parser.add_argument(
-        "--history-only",
+        "--with-odds",
         action="store_true",
         help=(
-            "carga clubes, partidos y estadísticas sin 8,8 millones de cuotas; "
-            "recomendado cuando el almacenamiento del servidor es limitado"
+            "incluye cuotas históricas; por defecto solo se cargan partidos y estadísticas"
         ),
+    )
+    parser.add_argument(
+        "--purge-odds",
+        action="store_true",
+        help="elimina las cuotas existentes antes de cargar los históricos",
     )
     parser.add_argument(
         "--skip-audit",
@@ -100,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
             progress_every=args.progress_every,
             minimum_matches=args.minimum_matches,
             audit=not args.skip_audit,
-            include_odds=not args.history_only,
+            include_odds=args.with_odds,
+            purge_odds=args.purge_odds,
         )
     except KeyboardInterrupt:
         print(
@@ -123,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
 
     output = {
         "destination": "postgresql",
-        "mode": "full" if not args.history_only else "history-only",
+        "mode": "full" if args.with_odds else "history-only",
         "import": report.as_dict(),
         "audit": audit_report,
     }

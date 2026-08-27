@@ -278,7 +278,7 @@ La SQLite completa ocupa 2,93 GB y contiene 8,78 millones de cuotas. PostgreSQL
 necesita además espacio para índices y operación, por lo que una base de 1 GB no
 puede recibir la carga completa. Hay dos modos reanudables:
 
-- `--history-only`: 274 mil partidos, clubes y estadísticas, sin cuotas
+- modo histórico (predeterminado): 274 mil partidos, clubes y estadísticas, sin cuotas
   históricas. Es suficiente para búsqueda, perfiles, resultados e H2H.
 - sin esa opción: carga completa, incluidas todas las cuotas; requiere un
   almacenamiento claramente superior al tamaño de la SQLite.
@@ -287,13 +287,16 @@ Desde `backend`, configura la URL externa solo para el proceso de carga:
 
 ```powershell
 $env:DATABASE_URL = "PEGA_AQUI_LA_EXTERNAL_DATABASE_URL"
-python -m app.db.load_postgres "..\Base de datos" --history-only
+python -m app.db.load_postgres "..\Base de datos" --purge-odds
 Remove-Item Env:DATABASE_URL
 ```
 
-Para incluir también las cuotas, repite el comando sin `--history-only`. El
-importador confirma lotes pequeños y registra la procedencia de cada fila; si la
-conexión se corta, ejecutar exactamente el mismo comando continúa de forma
+El modo predeterminado carga únicamente partidos, equipos, competiciones,
+temporadas y estadísticas. `--purge-odds` elimina las cuotas que ya existan en
+PostgreSQL antes de la carga. No uses `--with-odds`: las recomendaciones del
+producto se basan en evidencia estadística y no en precios de casas de apuestas.
+El importador confirma lotes pequeños y registra la procedencia de cada fila; si
+la conexión se corta, ejecutar exactamente el mismo comando continúa de forma
 idempotente. Al finalizar emite una auditoría y debe informar `status: ok`.
 
 Despliega o reinicia después el backend y comprueba:
