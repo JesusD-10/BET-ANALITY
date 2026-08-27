@@ -60,6 +60,8 @@ a { color: inherit; text-decoration: none; }
 .match-hero-board { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: clamp(18px, 5vw, 64px); max-width: 720px; margin: 0 auto 27px; }
 .match-hero-team { display: grid; justify-items: center; min-width: 0; }
 .match-hero-logo-shell { display: grid; place-items: center; width: clamp(104px, 14vw, 150px); height: clamp(104px, 14vw, 150px); color: var(--lime); border: 1px solid var(--line); border-radius: 30px; background: radial-gradient(circle at 50% 35%, #28342f, #151b19 70%); box-shadow: 0 18px 55px rgba(0, 0, 0, .25); font: 700 34px 'DM Mono', monospace; }
+.match-hero-team-link { cursor: pointer; transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease; }
+.match-hero-team-link:hover, .match-hero-team-link:focus-visible { border-color: var(--lime); transform: translateY(-3px); box-shadow: 0 18px 55px rgba(201, 242, 109, .12); outline: none; }
 .match-hero-logo { width: 82%; height: 82%; object-fit: contain; filter: drop-shadow(0 12px 16px rgba(0, 0, 0, .25)); }
 .match-hero-team small { margin-top: 14px; color: var(--muted); font: 9px 'DM Mono', monospace; letter-spacing: .14em; }
 .match-hero-team strong { max-width: 18ch; margin-top: 7px; font-size: clamp(13px, 1.6vw, 18px); line-height: 1.2; text-align: center; overflow-wrap: anywhere; }

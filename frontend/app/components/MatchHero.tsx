@@ -1,5 +1,6 @@
 /* eslint-disable @next/next/no-img-element */
 
+import Link from "next/link";
 import type { Match } from "../lib/api";
 
 type HeroPhase = "future" | "live" | "finished" | "other";
@@ -89,6 +90,12 @@ export default function MatchHero({
   const accessibleTitle = hasScore && phase !== "future"
     ? `${match.home_team} ${match.home_score}, ${match.away_team} ${match.away_score}. ${statusLabel}`
     : `${match.home_team} contra ${match.away_team}. ${statusLabel}`;
+  const homeTeamHref = match.home_team_id && Number.isSafeInteger(Number(match.home_team_id))
+    ? `/equipos/${match.home_team_id}`
+    : null;
+  const awayTeamHref = match.away_team_id && Number.isSafeInteger(Number(match.away_team_id))
+    ? `/equipos/${match.away_team_id}`
+    : null;
 
   return (
     <header className="match-detail-header match-hero">
@@ -96,11 +103,17 @@ export default function MatchHero({
         {match.competition} · {new Date(match.kickoff_at).toLocaleString("es-PE", { dateStyle: "full", timeStyle: "short" })}
       </p>
       <h1 className="sr-only">{accessibleTitle}</h1>
-      <div className="match-hero-board" aria-hidden="true">
+      <div className="match-hero-board">
         <div className="match-hero-team">
-          <div className="match-hero-logo-shell">
-            {match.home_logo ? <img src={match.home_logo} alt="" className="match-hero-logo" /> : <span>{match.home_team.slice(0, 2)}</span>}
-          </div>
+          {homeTeamHref ? (
+            <Link className="match-hero-logo-shell match-hero-team-link" href={homeTeamHref} aria-label={`Ver información de ${match.home_team}`}>
+              {match.home_logo ? <img src={match.home_logo} alt="" className="match-hero-logo" /> : <span>{match.home_team.slice(0, 2)}</span>}
+            </Link>
+          ) : (
+            <div className="match-hero-logo-shell">
+              {match.home_logo ? <img src={match.home_logo} alt="" className="match-hero-logo" /> : <span>{match.home_team.slice(0, 2)}</span>}
+            </div>
+          )}
           <small>LOCAL</small>
           <strong>{match.home_team}</strong>
         </div>
@@ -110,9 +123,15 @@ export default function MatchHero({
           <i />
         </div>
         <div className="match-hero-team">
-          <div className="match-hero-logo-shell">
-            {match.away_logo ? <img src={match.away_logo} alt="" className="match-hero-logo" /> : <span>{match.away_team.slice(0, 2)}</span>}
-          </div>
+          {awayTeamHref ? (
+            <Link className="match-hero-logo-shell match-hero-team-link" href={awayTeamHref} aria-label={`Ver información de ${match.away_team}`}>
+              {match.away_logo ? <img src={match.away_logo} alt="" className="match-hero-logo" /> : <span>{match.away_team.slice(0, 2)}</span>}
+            </Link>
+          ) : (
+            <div className="match-hero-logo-shell">
+              {match.away_logo ? <img src={match.away_logo} alt="" className="match-hero-logo" /> : <span>{match.away_team.slice(0, 2)}</span>}
+            </div>
+          )}
           <small>VISITANTE</small>
           <strong>{match.away_team}</strong>
         </div>
