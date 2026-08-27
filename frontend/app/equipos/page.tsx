@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  Heart,
   Search,
   Shield,
   Users,
@@ -22,6 +23,7 @@ import {
   type TeamSearchResponse,
   type TeamSummary,
 } from "../lib/api";
+import { readFavoriteTeams, toggleFavoriteTeam } from "../lib/favorites";
 
 const PAGE_SIZE = 20;
 
@@ -60,6 +62,14 @@ export default function TeamsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [retryVersion, setRetryVersion] = useState(0);
+  const [favoriteIds, setFavoriteIds] = useState<Set<number>>(() => new Set(readFavoriteTeams().map((team) => team.id)));
+
+  useEffect(() => {
+    const syncFavorites = () => setFavoriteIds(new Set(readFavoriteTeams().map((team) => team.id)));
+    syncFavorites();
+    window.addEventListener("storage", syncFavorites);
+    return () => window.removeEventListener("storage", syncFavorites);
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDeferredQuery(query.trim()), 300);
@@ -177,20 +187,48 @@ export default function TeamsPage() {
       ) : (
         <>
           <div className="team-directory-grid">
-            {items.map((team) => (
-              <Link className="team-directory-card" href={`/equipos/${team.id}`} key={team.id}>
-                <TeamLogo team={team} />
-                <div>
-                  <small>{teamKindLabel(team.kind)}</small>
-                  <strong>{team.name}</strong>
-                  <span>
-                    {team.country.flag_url && <img src={team.country.flag_url} alt="" />}
-                    {team.country.name}
-                  </span>
+            {items.map((team) => {
+              const isFavorite = favoriteIds.has(team.id);
+              return (
+                <div className="team-directory-card-shell" key={team.id}>
+                  <Link className="team-directory-card" href={`/equipos/${team.id}`}>
+                    <TeamLogo team={team} />
+                    <div>
+                      <small>{teamKindLabel(team.kind)}</small>
+                      <strong>{team.name}</strong>
+                      <span>
+                        {team.country.flag_url && <img src={team.country.flag_url} alt="" />}
+                        {team.country.name}
+                      </span>
+                    </div>
+                    <ChevronRight size={18} aria-hidden="true" />
+                  </Link>
+                  <button
+                    className={`team-directory-favorite ${isFavorite ? "active" : ""}`}
+                    type="button"
+                    aria-label={isFavorite ? `Quitar ${team.name} de favoritos` : `Agregar ${team.name} a favoritos`}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setFavoriteIds(() => {
+                        const next = toggleFavoriteTeam({
+                          id: team.id,
+                          name: team.name,
+                          slug: team.slug,
+                          kind: team.kind,
+                          logo_url: team.logo_url,
+                          country_name: team.country.name,
+                          country_flag_url: team.country.flag_url,
+                        });
+                        return new Set(next.map((item) => item.id));
+                      });
+                    }}
+                  >
+                    <Heart size={16} fill={isFavorite ? "currentColor" : "none"} aria-hidden="true" />
+                  </button>
                 </div>
-                <ChevronRight size={18} aria-hidden="true" />
-              </Link>
-            ))}
+              );
+            })}
           </div>
 
           {totalPages > 1 && (

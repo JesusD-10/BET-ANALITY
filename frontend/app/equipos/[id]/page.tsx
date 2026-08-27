@@ -10,6 +10,7 @@ import {
   ChevronRight,
   CircleAlert,
   Flag,
+  Heart,
   MapPin,
   Shield,
   Trophy,
@@ -27,6 +28,7 @@ import {
   type TeamMatchesResponse,
   type TeamMatchScope,
 } from "../../lib/api";
+import { readFavoriteTeams, toggleFavoriteTeam } from "../../lib/favorites";
 
 const HISTORY_PAGE_SIZE = 15;
 const dateFormatter = new Intl.DateTimeFormat("es-PE", {
@@ -141,6 +143,14 @@ export default function TeamDetailPage({ params }: { params: Promise<{ id: strin
   const [matchesLoading, setMatchesLoading] = useState(validTeamId);
   const [matchesError, setMatchesError] = useState("");
   const [matchesRetry, setMatchesRetry] = useState(0);
+  const [favoriteIds, setFavoriteIds] = useState<Set<number>>(() => new Set(readFavoriteTeams().map((team) => team.id)));
+
+  useEffect(() => {
+    const syncFavorites = () => setFavoriteIds(new Set(readFavoriteTeams().map((team) => team.id)));
+    syncFavorites();
+    window.addEventListener("storage", syncFavorites);
+    return () => window.removeEventListener("storage", syncFavorites);
+  }, []);
 
   useEffect(() => {
     if (!validTeamId) return;
@@ -238,6 +248,7 @@ export default function TeamDetailPage({ params }: { params: Promise<{ id: strin
 
   const { team, statistics } = detail;
   const totalPages = Math.max(1, matches?.total_pages ?? 1);
+  const isFavorite = favoriteIds.has(team.id);
 
   return (
     <AppShell contentId="equipo-historial">
@@ -247,14 +258,38 @@ export default function TeamDetailPage({ params }: { params: Promise<{ id: strin
         <div className="team-profile-logo">
           {team.logo_url ? <img src={team.logo_url} alt="" /> : <Shield size={45} aria-hidden="true" />}
         </div>
-        <div>
-          <p className="eyebrow">{team.kind === "national" ? "SELECCIÓN NACIONAL" : "CLUB"} · ARCHIVO HISTÓRICO</p>
-          <h1>{team.name}</h1>
-          <span className="team-profile-country">
-            {team.country.flag_url && <img src={team.country.flag_url} alt="" />}
-            {team.country.name}
-            {team.short_code ? ` · ${team.short_code}` : ""}
-          </span>
+        <div className="team-profile-meta">
+          <div>
+            <p className="eyebrow">{team.kind === "national" ? "SELECCIÓN NACIONAL" : "CLUB"} · ARCHIVO HISTÓRICO</p>
+            <h1>{team.name}</h1>
+            <span className="team-profile-country">
+              {team.country.flag_url && <img src={team.country.flag_url} alt="" />}
+              {team.country.name}
+              {team.short_code ? ` · ${team.short_code}` : ""}
+            </span>
+          </div>
+          <button
+            className={`team-favorite-toggle ${isFavorite ? "active" : ""}`}
+            type="button"
+            aria-label={isFavorite ? `Quitar ${team.name} de favoritos` : `Agregar ${team.name} a favoritos`}
+            onClick={() => {
+              setFavoriteIds(() => {
+                const next = toggleFavoriteTeam({
+                  id: team.id,
+                  name: team.name,
+                  slug: team.slug,
+                  kind: team.kind,
+                  logo_url: team.logo_url,
+                  country_name: team.country.name,
+                  country_flag_url: team.country.flag_url,
+                });
+                return new Set(next.map((item) => item.id));
+              });
+            }}
+          >
+            <Heart size={16} fill={isFavorite ? "currentColor" : "none"} aria-hidden="true" />
+            {isFavorite ? "En favoritos" : "Agregar a favoritos"}
+          </button>
         </div>
       </header>
 
