@@ -22,6 +22,9 @@ def use_explicit_demo_mode(monkeypatch):
     monkeypatch.setattr(settings, "sportmonks_api_token", "")
     monkeypatch.setattr(settings, "football_data_api_token", "")
     monkeypatch.setattr(ai_gateway, "is_available", lambda: False)
+    # Demo-mode tests must stay deterministic even when a populated local
+    # historical database exists at the application's default path.
+    monkeypatch.setattr(matches_service, "_stored_fixture_result", lambda *_args, **_kwargs: None)
     _fixture_cache.clear()
     _fixture_by_id.clear()
     _analysis_cache.clear()

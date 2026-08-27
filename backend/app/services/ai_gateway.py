@@ -129,9 +129,9 @@ def _completion_payload(
         "model": provider.model,
         "messages": messages,
         "stream": False,
-        "temperature": 0.2,
         provider.token_parameter: max_tokens,
     }
+    payload["temperature"] = 0.2
     if response_format is not None:
         payload["response_format"] = response_format
         if provider.name == "openrouter":

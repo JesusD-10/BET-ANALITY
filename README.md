@@ -95,8 +95,9 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=openrouter/free
 OPENROUTER_SITE_URL=https://bet-anality-1.onrender.com
 
+# En local omite DATABASE_URL para usar la SQLite de la raíz.
 # En Render usa la Internal Database URL del PostgreSQL.
-DATABASE_URL=sqlite:///./bet_analizador.db
+# DATABASE_URL=postgresql://USUARIO:CONTRASENA@HOST/BASE
 
 # API-SPORTS / API-Football (conexión directa, no RapidAPI)
 # También se acepta el alias api-sports
@@ -244,37 +245,90 @@ después importa de forma idempotente:
 python -m app.db.init_db
 python -m app.db.import_historical "../Base de datos"
 python -m app.db.import_historical "../Base de datos" --commit
+python -m app.db.audit_database --minimum-matches 1
 ```
 
 Sin `--commit`, el importador siempre funciona como *dry run*. Repetir el
-último comando no duplica encuentros, estadísticas ni cuotas. Los ZIP no se
-extraen automáticamente porque necesitan un esquema de origen conocido.
+último comando no duplica encuentros, estadísticas ni cuotas. El destino local
+predeterminado es siempre `bet_analizador.db` en la raíz del repositorio, sin
+depender de la carpeta desde la cual arranque Python.
+
+El importador procesa en streaming los `.xls`, `.xlsx`, `.csv` y `.tsv`. También
+lee directamente, sin extraer al disco, los dos archivos Football.TXT conocidos:
+
+- `internationals-master.zip`: resultados internacionales por torneo y año.
+- `worldcup-master.zip`: `cup.txt` y `cup_finals.txt` de cada edición se usan
+  para enriquecer los mismos Mundiales con hora, descanso, ronda y estadio.
+
+Las rutas internas, el tamaño y la tasa de compresión de cada miembro ZIP se
+validan antes de leerlo. Las representaciones repetidas (`min/`, `more/`, RSSSF
+y Wikipedia) se excluyen deliberadamente. La huella de competición, fecha y
+equipos hace converger ambos ZIP en un solo partido, mientras `import_records`
+conserva la procedencia de cada fila. `audit_database` comprueba conteos,
+integridad SQLite, claves foráneas y huellas duplicadas.
 
 ### Crear PostgreSQL en Render
 
-1. En el Dashboard usa **New → Postgres**, elige la misma región del backend y
-   espera el estado `Available`.
-2. Copia la **Internal Database URL** y agrégala como `DATABASE_URL` únicamente
-   en el servicio backend. Nunca uses una variable `NEXT_PUBLIC_*` para ella.
-3. Despliega de nuevo el backend. El arranque crea de forma idempotente las
-   tablas. En el plan Free, que no incluye Shell, abre
-   `https://TU-BACKEND.onrender.com/api/v1/health/database`: una base preparada
-   responde HTTP 200 con `{"status":"ready","connection":"ok","schema":"complete"}`.
-4. Para cargar los Excel locales sin subirlos a Git, conecta temporalmente tu
-   terminal a la **External Database URL** y ejecuta el importador desde
-   `backend`. En PowerShell:
+El servicio backend debe conservar la **Internal Database URL** en su variable
+`DATABASE_URL`. Para cargar desde una computadora se usa temporalmente la
+**External Database URL** completa (incluido `sslmode=require` cuando aparezca
+en la URL). No copies ninguna de las dos credenciales al frontend ni a Git.
+
+La SQLite completa ocupa 2,93 GB y contiene 8,78 millones de cuotas. PostgreSQL
+necesita además espacio para índices y operación, por lo que una base de 1 GB no
+puede recibir la carga completa. Hay dos modos reanudables:
+
+- `--history-only`: 274 mil partidos, clubes y estadísticas, sin cuotas
+  históricas. Es suficiente para búsqueda, perfiles, resultados e H2H.
+- sin esa opción: carga completa, incluidas todas las cuotas; requiere un
+  almacenamiento claramente superior al tamaño de la SQLite.
+
+Desde `backend`, configura la URL externa solo para el proceso de carga:
 
 ```powershell
 $env:DATABASE_URL = "PEGA_AQUI_LA_EXTERNAL_DATABASE_URL"
-python -m app.db.init_db
-python -m app.db.import_historical "..\Base de datos" --commit
+python -m app.db.load_postgres "..\Base de datos" --history-only
 Remove-Item Env:DATABASE_URL
 ```
 
-Cuando termine, restringe o desactiva el acceso externo de PostgreSQL. El
-backend desplegado debe conservar la URL interna. Render recomienda ubicar base
-y servicio en la misma región y usar siempre la conexión privada cuando ambos
-corren allí.
+Para incluir también las cuotas, repite el comando sin `--history-only`. El
+importador confirma lotes pequeños y registra la procedencia de cada fila; si la
+conexión se corta, ejecutar exactamente el mismo comando continúa de forma
+idempotente. Al finalizar emite una auditoría y debe informar `status: ok`.
+
+Despliega o reinicia después el backend y comprueba:
+
+```text
+https://TU-BACKEND.onrender.com/api/v1/health/database
+https://TU-BACKEND.onrender.com/api/v1/teams?q=Arsenal
+```
+
+Una base preparada responde `ready` en el primer endpoint y una lista paginada
+en el segundo. Después de la carga conviene restringir de nuevo el acceso
+externo. El backend desplegado sigue usando la URL interna de Render.
+
+La SQLite local es un entorno de preparación y control de calidad: **no se sube
+el archivo `.db` al servicio ni se commitea la carpeta `Base de datos/`**. Para
+PostgreSQL se ejecuta el mismo importador contra la URL externa, de modo que el
+esquema, los tipos y las restricciones se validen en el motor de destino.
+
+Render documenta la diferencia entre conexiones
+[internas y externas](https://render.com/docs/postgresql-creating-connecting) y
+la capacidad de [almacenamiento de PostgreSQL](https://render.com/docs/postgresql-refresh).
+
+### Historial y perfiles de equipos
+
+La interfaz `/equipos` consume exclusivamente la base normalizada. La API ofrece:
+
+- `GET /api/v1/teams?q=...`: búsqueda paginada por club o selección.
+- `GET /api/v1/teams/{id}`: ficha, balance histórico y competiciones.
+- `GET /api/v1/teams/{id}/matches?scope=past`: resultados históricos paginados.
+- `GET /api/v1/teams/{id}/matches?scope=upcoming`: próximos partidos guardados.
+- `GET /api/v1/teams/{id}/h2h/{opponent_id}`: enfrentamientos directos.
+
+Los endpoints consultan por índices de equipo y fecha; no cargan las cuotas ni
+los cientos de miles de partidos en memoria. Las imágenes y plantillas aparecen
+cuando `sync_catalog` las haya sincronizado desde el proveedor configurado.
 
 Los Excel históricos no incluyen fichas completas ni imágenes. Clubes, escudos,
 jugadores y fotos deben sincronizarse desde API-Football o Sportmonks según la

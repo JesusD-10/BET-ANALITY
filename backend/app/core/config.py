@@ -65,8 +65,9 @@ class Settings(BaseSettings):
 
     openrouter_site_url: str = "https://bet-anality-1.onrender.com"
 
-    # Database Configuration (Defaults to SQLite for local development)
-    database_url: str = "sqlite:///./bet_analizador.db"
+    # Database Configuration (Defaults to one deterministic SQLite file at the
+    # repository root, regardless of the directory used to start the backend).
+    database_url: str = f"sqlite:///{(PROJECT_ROOT / 'bet_analizador.db').as_posix()}"
 
     # API-SPORTS / API-Football
     sports_data_provider: str = "api-football"

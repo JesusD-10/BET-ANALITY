@@ -13,3 +13,4 @@ dist/
 *.db
 *.sqlite
 *.sqlite3
+/Base de datos/

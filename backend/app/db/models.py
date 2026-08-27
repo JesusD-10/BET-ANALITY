@@ -101,6 +101,8 @@ class Team(Base):
     __table_args__ = (
         UniqueConstraint("country_id", "slug", name="uq_team_country_slug"),
         UniqueConstraint("source_provider", "external_id", name="uq_team_provider_external"),
+        Index("ix_teams_slug", "slug"),
+        Index("ix_teams_name", "name"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -192,6 +194,8 @@ class Match(Base):
         CheckConstraint("away_score IS NULL OR away_score >= 0", name="ck_match_away_score"),
         Index("ix_matches_date_status", "match_date", "status"),
         Index("ix_matches_competition_kickoff", "competition_id", "kickoff_at"),
+        Index("ix_matches_home_date", "home_team_id", "match_date"),
+        Index("ix_matches_away_date", "away_team_id", "match_date"),
     )
 
     id = Column(Integer, primary_key=True)

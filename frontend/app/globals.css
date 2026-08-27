@@ -684,3 +684,169 @@ a { color: inherit; text-decoration: none; }
   .scoreboard-refresh-state .is-spinning { animation: none; }
   .score-match-link, .score-match-arrow { transition: none; }
 }
+
+/* Team directory and historical profile */
+.teams-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 760px;
+  margin: -17px 0 27px;
+  color: var(--muted);
+}
+.teams-intro svg { flex: 0 0 auto; color: var(--lime); }
+.teams-intro p { margin: 0; font-size: 11px; line-height: 1.7; }
+.team-search-panel {
+  display: grid;
+  grid-template-columns: minmax(240px, 620px) minmax(150px, 190px);
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.team-search-input { width: 100%; max-width: none; }
+.clear-search-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.clear-search-button:hover, .clear-search-button:focus-visible { color: var(--lime); outline: none; }
+.team-kind-filter { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--line); background: #151b19; }
+.team-kind-filter > span { color: var(--muted); font: 8px 'DM Mono', monospace; text-transform: uppercase; }
+.team-kind-filter select, .team-history-filters select {
+  min-width: 0;
+  height: 43px;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  color-scheme: dark;
+  background: #151b19;
+  font-size: 10px;
+}
+.team-results-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 33px; padding-bottom: 9px; border-bottom: 1px solid var(--line); color: var(--muted); font: 9px 'DM Mono', monospace; }
+.team-results-heading small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-state { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 10px; min-height: 190px; text-align: center; }
+.team-directory-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); background: var(--line); }
+.team-directory-card {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 14px;
+  min-height: 91px;
+  padding: 15px;
+  color: inherit;
+  background: #171d1b;
+  transition: background .18s ease, box-shadow .18s ease;
+}
+.team-directory-card:hover, .team-directory-card:focus-visible { outline: none; background: #1d2723; box-shadow: inset 2px 0 var(--lime); }
+.team-directory-card > svg { color: var(--muted); transition: transform .18s ease, color .18s ease; }
+.team-directory-card:hover > svg, .team-directory-card:focus-visible > svg { color: var(--lime); transform: translateX(2px); }
+.team-directory-logo { display: grid; place-items: center; width: 50px; height: 50px; object-fit: contain; }
+.team-directory-logo-fallback { color: var(--lime); border: 1px solid var(--line); border-radius: 12px; background: #151b19; }
+.team-directory-card > div { display: grid; min-width: 0; gap: 5px; }
+.team-directory-card small { color: var(--muted); font: 7px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
+.team-directory-card strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.team-directory-card div > span { display: flex; align-items: center; gap: 6px; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.team-directory-card div > span img, .team-profile-country img { width: 15px; height: 15px; border-radius: 50%; object-fit: cover; }
+
+.history-pagination { display: flex; align-items: center; justify-content: center; gap: 22px; margin-top: 22px; }
+.history-pagination button { display: inline-flex; align-items: center; gap: 6px; min-height: 42px; padding: 0 13px; border: 1px solid var(--line); color: var(--ink); background: #151b19; font-size: 9px; font-weight: 700; cursor: pointer; }
+.history-pagination button:hover:not(:disabled), .history-pagination button:focus-visible:not(:disabled) { color: var(--lime); border-color: #64735e; outline: none; }
+.history-pagination button:disabled { color: var(--muted); cursor: default; opacity: .45; }
+.history-pagination > span { color: var(--muted); font: 9px 'DM Mono', monospace; }
+.history-pagination b { color: var(--ink); }
+
+.team-profile-header { display: flex; align-items: center; gap: clamp(20px, 4vw, 38px); margin-bottom: 30px; padding: 23px 0 31px; border-bottom: 1px solid var(--line); }
+.team-profile-logo { display: grid; place-items: center; flex: 0 0 auto; width: clamp(88px, 12vw, 124px); height: clamp(88px, 12vw, 124px); color: var(--lime); border: 1px solid var(--line); border-radius: 25px; background: radial-gradient(circle at 50% 35%, #28342f, #151b19 70%); }
+.team-profile-logo img { width: 78%; height: 78%; object-fit: contain; }
+.team-profile-header h1 { margin: 0 0 11px; font-size: clamp(35px, 5vw, 64px); line-height: 1; letter-spacing: -.055em; overflow-wrap: anywhere; }
+.team-profile-country { display: flex; align-items: center; gap: 7px; color: var(--muted); font: 9px 'DM Mono', monospace; }
+.team-stat-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); background: var(--line); }
+.team-stat-grid article { display: grid; align-content: center; min-height: 105px; padding: 16px; background: #171d1b; }
+.team-stat-grid small { color: var(--muted); font: 8px/1.45 'DM Mono', monospace; }
+.team-stat-grid strong { margin-top: 8px; color: var(--lime); font: 22px 'DM Mono', monospace; }
+.team-record-context { display: flex; flex-wrap: wrap; gap: 9px 22px; margin: 13px 0 47px; color: var(--muted); font: 8px 'DM Mono', monospace; }
+.team-record-context span { display: inline-flex; align-items: center; gap: 6px; }
+.team-record-context svg { color: var(--lime); }
+.team-record-context b { color: var(--ink); font-weight: 500; }
+.team-competitions { margin-bottom: 52px; }
+.team-competition-list { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 7px; scrollbar-width: thin; }
+.team-competition-list button { display: grid; grid-template-columns: 17px minmax(110px, 1fr) auto; align-items: center; flex: 0 0 auto; gap: 8px; min-height: 48px; padding: 7px 11px; border: 1px solid var(--line); color: var(--muted); background: #151b19; text-align: left; cursor: pointer; }
+.team-competition-list button svg { color: var(--lime); }
+.team-competition-list button span { max-width: 180px; overflow: hidden; color: var(--ink); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.team-competition-list button b { display: grid; place-items: center; min-width: 23px; height: 23px; padding: 0 5px; color: var(--muted); border-radius: 12px; background: #222b28; font: 8px 'DM Mono', monospace; }
+.team-competition-list button:hover, .team-competition-list button:focus-visible, .team-competition-list button.active { border-color: #64735e; outline: none; }
+.team-competition-list button.active { border-color: var(--lime); background: rgba(201, 242, 109, .06); }
+.team-history-section { min-width: 0; }
+.team-history-heading { align-items: flex-end; }
+.team-history-heading > span { color: var(--muted); font: 9px 'DM Mono', monospace; }
+.team-history-filters { display: flex; align-items: stretch; justify-content: space-between; gap: 12px; margin-bottom: 13px; padding: 7px; border: 1px solid var(--line); background: #151b19; }
+.team-scope-tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
+.team-scope-tabs button { flex: 0 0 auto; min-height: 42px; padding: 0 13px; border: 1px solid transparent; color: var(--muted); background: transparent; font-size: 9px; font-weight: 700; cursor: pointer; }
+.team-scope-tabs button:hover, .team-scope-tabs button:focus-visible { color: var(--ink); border-color: var(--line); outline: none; }
+.team-scope-tabs button.active { color: #162019; border-color: var(--lime); background: var(--lime); }
+.team-history-filters label { min-width: 210px; padding: 0 7px; border: 1px solid var(--line); }
+.team-history-filters select { width: 100%; }
+.team-history-list { border: 1px solid var(--line); background: #171d1b; }
+.team-history-row { display: grid; grid-template-columns: 105px minmax(0, 1fr) 84px; align-items: center; gap: 18px; min-height: 105px; padding: 15px 17px; border-bottom: 1px solid var(--line); }
+.team-history-row:last-child { border-bottom: 0; }
+.team-history-row:hover { background: #1d2723; }
+.team-history-date { display: grid; gap: 5px; color: var(--muted); font: 8px 'DM Mono', monospace; }
+.team-history-date strong { color: var(--ink); font-size: 9px; font-weight: 500; }
+.team-history-match { display: grid; min-width: 0; gap: 9px; }
+.team-history-match > small { overflow: hidden; color: var(--muted); font: 7px 'DM Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
+.team-history-score { display: grid; grid-template-columns: minmax(0, 1fr) 66px minmax(0, 1fr); align-items: center; gap: 12px; }
+.team-history-score span { display: flex; align-items: center; min-width: 0; gap: 7px; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.team-history-score span:last-child { justify-content: flex-end; text-align: right; }
+.team-history-score span.selected-team { color: var(--ink); font-weight: 800; }
+.team-history-score img { flex: 0 0 auto; width: 22px; height: 22px; object-fit: contain; }
+.team-history-score b { text-align: center; color: var(--lime); font: 15px 'DM Mono', monospace; white-space: nowrap; }
+.team-history-subline { display: flex; align-items: center; gap: 5px; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.team-result-badge { justify-self: end; min-width: 76px; padding: 7px 8px; border: 1px solid var(--line); color: var(--muted); font: 8px 'DM Mono', monospace; text-align: center; }
+.team-result-badge.is-win { color: var(--lime); border-color: #4e6144; background: rgba(201, 242, 109, .06); }
+.team-result-badge.is-draw { color: var(--ink); }
+.team-result-badge.is-loss { color: var(--orange); border-color: #704b36; background: rgba(237, 146, 90, .05); }
+.team-history-note { display: flex; align-items: flex-start; gap: 9px; margin-top: 28px; color: var(--muted); font: 8px/1.6 'DM Mono', monospace; }
+.team-history-note svg { flex: 0 0 auto; color: var(--lime); }
+
+@media (max-width: 1000px) {
+  .team-stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .team-directory-grid { grid-template-columns: 1fr; }
+  .team-history-filters { align-items: stretch; flex-direction: column; }
+  .team-history-filters label { min-width: 0; }
+  .team-history-row { grid-template-columns: 82px minmax(0, 1fr); gap: 12px; }
+  .team-result-badge { grid-column: 2; justify-self: start; }
+  .team-history-score { grid-template-columns: minmax(0, 1fr) 54px minmax(0, 1fr); gap: 7px; }
+}
+
+@media (max-width: 600px) {
+  .team-search-panel { grid-template-columns: 1fr; }
+  .team-kind-filter { min-height: 45px; }
+  .team-results-heading small { display: none; }
+  .team-profile-header { align-items: flex-start; }
+  .team-profile-logo { width: 78px; height: 78px; border-radius: 19px; }
+  .team-profile-header h1 { font-size: 33px; }
+  .team-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .team-stat-grid article { min-height: 92px; }
+  .team-record-context { align-items: flex-start; flex-direction: column; }
+  .team-history-row { grid-template-columns: 1fr; }
+  .team-history-date { grid-template-columns: auto auto; justify-content: space-between; }
+  .team-result-badge { grid-column: 1; }
+  .team-history-score { grid-template-columns: minmax(0, 1fr) 44px minmax(0, 1fr); }
+  .team-history-score span { align-items: center; flex-direction: column; text-align: center; white-space: normal; }
+  .team-history-score span:last-child { justify-content: center; text-align: center; }
+  .history-pagination { justify-content: space-between; gap: 7px; }
+  .history-pagination > span { text-align: center; }
+  .history-pagination button { padding: 0 9px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .team-directory-card, .team-directory-card > svg { transition: none; }
+}

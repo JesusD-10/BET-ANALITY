@@ -10,6 +10,15 @@ from app.db import models as _models  # noqa: F401,E402
 
 _sqlite_listener_registered = False
 
+_HISTORY_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS ix_matches_home_date "
+    "ON matches (home_team_id, match_date)",
+    "CREATE INDEX IF NOT EXISTS ix_matches_away_date "
+    "ON matches (away_team_id, match_date)",
+    "CREATE INDEX IF NOT EXISTS ix_teams_name ON teams (name)",
+    "CREATE INDEX IF NOT EXISTS ix_teams_slug ON teams (slug)",
+)
+
 
 def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
     cursor = dbapi_connection.cursor()
@@ -35,6 +44,12 @@ def init_database() -> None:
         with engine.begin() as connection:
             connection.execute(text("PRAGMA foreign_keys=ON"))
     Base.metadata.create_all(bind=engine)
+    # ``create_all`` does not add newly declared indexes to tables that already
+    # exist. These portable, idempotent statements upgrade both the populated
+    # local SQLite and an already-created Render PostgreSQL database.
+    with engine.begin() as connection:
+        for statement in _HISTORY_INDEX_STATEMENTS:
+            connection.execute(text(statement))
 
 
 def main() -> int:

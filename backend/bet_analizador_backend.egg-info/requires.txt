@@ -1,7 +1,12 @@
 fastapi<1.0,>=0.115
 uvicorn[standard]<1.0,>=0.30
 pydantic-settings<3.0,>=2.6
+httpx<1.0,>=0.27
+sqlalchemy<3.0,>=2.0
+psycopg2-binary<3.0,>=2.9
+pandas<3.0,>=2.0
+openpyxl<4.0,>=3.1
+xlrd<3.0,>=2.0
 
 [dev]
-httpx<1.0,>=0.27
 pytest<9.0,>=8.0

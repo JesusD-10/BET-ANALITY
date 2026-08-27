@@ -4,13 +4,15 @@ from ipaddress import IPv4Address, IPv6Address, ip_address
 from math import ceil
 from threading import Lock
 import time
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.db.health import database_is_ready
 from app.schemas.health import DatabaseHealthResponse, HealthResponse
 from app.schemas.matches import AssistantQuestion, AssistantResponse, MatchAnalysisResponse, MatchListResponse, RecommendationResponse
+from app.schemas.teams import TeamDetailResponse, TeamMatchesResponse, TeamSearchResponse
 from app.services.ai_gateway import ai_gateway
 from app.services.matches import (
     MatchProviderUnavailable,
@@ -21,6 +23,14 @@ from app.services.matches import (
     get_live_matches_result,
     get_recommendations,
     search_matches_result,
+)
+from app.services.teams import (
+    InvalidTeamPairError,
+    TeamNotFoundError,
+    get_head_to_head,
+    get_team_detail,
+    get_team_matches,
+    search_teams,
 )
 
 router = APIRouter()
@@ -166,6 +176,88 @@ def database_health() -> DatabaseHealthResponse | JSONResponse:
         schema="unavailable",
     )
     return JSONResponse(status_code=503, content=unavailable.model_dump(by_alias=True))
+
+
+@router.get("/teams", response_model=TeamSearchResponse, tags=["teams"])
+def teams(
+    q: str | None = Query(default=None, min_length=2, max_length=120),
+    country_code: str | None = Query(
+        default=None,
+        min_length=2,
+        max_length=8,
+        pattern=r"^[A-Za-z]+$",
+    ),
+    kind: Literal["club", "national"] | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> TeamSearchResponse:
+    return search_teams(
+        query=q,
+        country_code=country_code,
+        kind=kind,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/teams/{team_id}/matches",
+    response_model=TeamMatchesResponse,
+    tags=["teams"],
+)
+def team_matches(
+    team_id: int = Path(ge=1),
+    scope: Literal["past", "upcoming", "all"] = Query(default="past"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    competition_id: int | None = Query(default=None, ge=1),
+) -> TeamMatchesResponse:
+    try:
+        return get_team_matches(
+            team_id,
+            scope=scope,
+            page=page,
+            page_size=page_size,
+            competition_id=competition_id,
+        )
+    except TeamNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="El equipo solicitado no existe") from exc
+
+
+@router.get(
+    "/teams/{team_id}/h2h/{opponent_id}",
+    response_model=TeamMatchesResponse,
+    tags=["teams"],
+)
+def team_head_to_head(
+    team_id: int = Path(ge=1),
+    opponent_id: int = Path(ge=1),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> TeamMatchesResponse:
+    try:
+        return get_head_to_head(
+            team_id,
+            opponent_id,
+            page=page,
+            page_size=page_size,
+        )
+    except TeamNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="El equipo solicitado no existe") from exc
+    except InvalidTeamPairError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/teams/{team_id}",
+    response_model=TeamDetailResponse,
+    tags=["teams"],
+)
+def team_detail(team_id: int = Path(ge=1)) -> TeamDetailResponse:
+    try:
+        return get_team_detail(team_id)
+    except TeamNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="El equipo solicitado no existe") from exc
 
 
 @router.get("/matches/highlights", response_model=MatchListResponse, tags=["matches"])

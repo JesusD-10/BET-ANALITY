@@ -30,6 +30,7 @@ COUNTRIES: dict[str, CountrySpec] = {
     "GRC": CountrySpec("GRC", "Greece"),
     "IRL": CountrySpec("IRL", "Ireland"),
     "ITA": CountrySpec("ITA", "Italy"),
+    "INT": CountrySpec("INT", "International"),
     "JPN": CountrySpec("JPN", "Japan"),
     "MEX": CountrySpec("MEX", "Mexico"),
     "NLD": CountrySpec("NLD", "Netherlands"),
@@ -63,6 +64,8 @@ COUNTRY_ALIASES: dict[str, str] = {
     "PORTUGAL": "PRT",
     "TURKEY": "TUR",
     "GREECE": "GRC",
+    "INTERNATIONAL": "INT",
+    "WORLD": "INT",
 }
 
 

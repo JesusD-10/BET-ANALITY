@@ -471,3 +471,196 @@ export async function getRecommendations(kind: "daily" | "dreams" = "daily", lim
   return response.json() as Promise<{ recommendations: Recommendation[] }>;
 }
 
+export type TeamCountry = {
+  code: string;
+  name: string;
+  flag_url?: string | null;
+};
+
+export type TeamSummary = {
+  id: number;
+  name: string;
+  slug: string;
+  short_code?: string | null;
+  kind: string;
+  logo_url?: string | null;
+  country: TeamCountry;
+};
+
+export type TeamSearchResponse = {
+  items: TeamSummary[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+};
+
+export type TeamStatistics = {
+  total_matches: number;
+  completed_matches: number;
+  upcoming_matches: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  goals_for: number;
+  goals_against: number;
+  first_match_date?: string | null;
+  last_match_date?: string | null;
+  next_match_date?: string | null;
+};
+
+export type TeamCompetition = {
+  id: number;
+  name: string;
+  slug: string;
+  kind: string;
+  country_code?: string | null;
+  logo_url?: string | null;
+  matches: number;
+};
+
+export type TeamDetailResponse = {
+  team: TeamSummary;
+  statistics: TeamStatistics;
+  competitions: TeamCompetition[];
+};
+
+export type HistoricalMatchTeam = {
+  id: number;
+  name: string;
+  slug: string;
+  logo_url?: string | null;
+};
+
+export type HistoricalMatchCompetition = {
+  id: number;
+  name: string;
+  slug: string;
+  kind: string;
+  country_code?: string | null;
+  logo_url?: string | null;
+};
+
+export type HistoricalMatchSeason = {
+  id: number;
+  label: string;
+  start_year: number;
+  end_year: number;
+};
+
+export type TeamMatch = {
+  id: string;
+  match_date: string;
+  kickoff_at: string;
+  kickoff_precision: string;
+  status: string;
+  status_short?: string | null;
+  competition: HistoricalMatchCompetition;
+  season?: HistoricalMatchSeason | null;
+  round?: string | null;
+  venue?: string | null;
+  home_team: HistoricalMatchTeam;
+  away_team: HistoricalMatchTeam;
+  home_score?: number | null;
+  away_score?: number | null;
+  half_time_home_score?: number | null;
+  half_time_away_score?: number | null;
+  team_side: "home" | "away" | string;
+  result?: "win" | "draw" | "loss" | null;
+  opponent: HistoricalMatchTeam;
+};
+
+export type TeamMatchScope = "past" | "upcoming" | "all";
+
+export type TeamMatchesResponse = {
+  team_id: number;
+  scope: TeamMatchScope | "h2h";
+  opponent_id?: number;
+  items: TeamMatch[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+};
+
+export type TeamSearchOptions = {
+  query?: string;
+  countryCode?: string;
+  kind?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+export async function getTeams(
+  options: TeamSearchOptions = {},
+  signal?: AbortSignal,
+): Promise<TeamSearchResponse> {
+  const params = new URLSearchParams();
+  if (options.query?.trim()) params.set("q", options.query.trim());
+  if (options.countryCode) params.set("country_code", options.countryCode);
+  if (options.kind) params.set("kind", options.kind);
+  params.set("page", String(options.page ?? 1));
+  params.set("page_size", String(options.pageSize ?? 20));
+
+  const response = await apiFetch(`${apiUrl}/teams?${params.toString()}`, {
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) await throwApiError(response, "No se pudieron cargar los equipos");
+  return response.json() as Promise<TeamSearchResponse>;
+}
+
+export async function getTeam(teamId: number, signal?: AbortSignal): Promise<TeamDetailResponse> {
+  const response = await apiFetch(`${apiUrl}/teams/${encodeURIComponent(String(teamId))}`, {
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) await throwApiError(response, "No se pudo cargar el equipo");
+  return response.json() as Promise<TeamDetailResponse>;
+}
+
+export type TeamMatchesOptions = {
+  scope?: TeamMatchScope;
+  page?: number;
+  pageSize?: number;
+  competitionId?: number;
+};
+
+export async function getTeamMatches(
+  teamId: number,
+  options: TeamMatchesOptions = {},
+  signal?: AbortSignal,
+): Promise<TeamMatchesResponse> {
+  const params = new URLSearchParams({
+    scope: options.scope ?? "past",
+    page: String(options.page ?? 1),
+    page_size: String(options.pageSize ?? 20),
+  });
+  if (options.competitionId !== undefined) {
+    params.set("competition_id", String(options.competitionId));
+  }
+
+  const response = await apiFetch(
+    `${apiUrl}/teams/${encodeURIComponent(String(teamId))}/matches?${params.toString()}`,
+    { cache: "no-store", signal },
+  );
+  if (!response.ok) await throwApiError(response, "No se pudo cargar el historial del equipo");
+  return response.json() as Promise<TeamMatchesResponse>;
+}
+
+export async function getTeamHeadToHead(
+  teamId: number,
+  opponentId: number,
+  page = 1,
+  pageSize = 20,
+  signal?: AbortSignal,
+): Promise<TeamMatchesResponse> {
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  const response = await apiFetch(
+    `${apiUrl}/teams/${encodeURIComponent(String(teamId))}/h2h/${encodeURIComponent(String(opponentId))}?${params.toString()}`,
+    { cache: "no-store", signal },
+  );
+  if (!response.ok) await throwApiError(response, "No se pudo cargar el historial entre los equipos");
+  return response.json() as Promise<TeamMatchesResponse>;
+}
+

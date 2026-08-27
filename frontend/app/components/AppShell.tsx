@@ -12,11 +12,13 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Sparkles,
+  Users,
 } from "lucide-react";
 
 const navigationItems = [
   { href: "/", label: "Panorama", icon: BarChart3 },
   { href: "/partidos", label: "Partidos", icon: CalendarDays },
+  { href: "/equipos", label: "Equipos", icon: Users },
   { href: "/recomendaciones", label: "Recomendaciones", icon: Sparkles },
   { href: "/sonadoras", label: "Soñadoras", icon: Sparkles },
   { href: "/rendimiento", label: "Rendimiento", icon: Gauge },
