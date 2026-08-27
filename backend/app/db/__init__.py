@@ -22,4 +22,10 @@ def load_matches(match_date: date) -> list[MatchSummary]:
 
     return load(match_date)
 
-__all__ = ["init_database", "load_matches", "persist_matches"]
+
+def load_match(public_id: str) -> MatchSummary | None:
+    from app.db.repository import load_match as load
+
+    return load(public_id)
+
+__all__ = ["init_database", "load_match", "load_matches", "persist_matches"]

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.core.config import settings
+from app.db import load_match as load_stored_match
 from app.db import load_matches as load_stored_matches
 from app.db import persist_matches as persist_stored_matches
 from app.schemas.matches import (
@@ -1006,6 +1007,15 @@ def get_match(match_id: str) -> MatchSummary | None:
         if cached.source_provider == "mock" and _active_provider() is not mock_provider:
             return None
         return cached
+
+    try:
+        stored = load_stored_match(match_id)
+    except Exception:
+        logger.exception("No se pudo consultar el partido %s en la base de datos.", match_id)
+        stored = None
+    if stored is not None:
+        _index_matches([stored])
+        return stored
 
     provider = _provider_for_match_id(match_id)
     if match_id.startswith("demo-"):

@@ -338,45 +338,60 @@ def load_matches(match_date: date) -> list[MatchSummary]:
             .order_by(Match.kickoff_at, Match.id)
         ).all()
 
-        output: list[MatchSummary] = []
-        for row in rows:
-            kickoff = row.kickoff_at
-            if kickoff.tzinfo is None:
-                kickoff = kickoff.replace(tzinfo=timezone.utc)
-            output.append(
-                MatchSummary(
-                    id=row.public_id,
-                    competition=row.competition.name,
-                    country=row.competition.country.name,
-                    country_code=row.competition.country.code,
-                    competition_logo=row.competition.logo_url,
-                    kickoff_at=kickoff,
-                    home_team=row.home_team.name,
-                    away_team=row.away_team.name,
-                    home_team_id=row.home_team.external_id,
-                    away_team_id=row.away_team.external_id,
-                    league_id=row.competition.external_id,
-                    season=row.season.start_year if row.season else None,
-                    round=row.round,
-                    venue_id=row.venue_id,
-                    venue=row.venue,
-                    referee=row.referee,
-                    home_form=row.home_form,
-                    away_form=row.away_form,
-                    home_logo=row.home_team.logo_url,
-                    away_logo=row.away_team.logo_url,
-                    data_quality=row.data_quality,
-                    odds_available=row.odds_available,
-                    home_score=row.home_score,
-                    away_score=row.away_score,
-                    halftime_home_score=row.half_time_home_score,
-                    halftime_away_score=row.half_time_away_score,
-                    elapsed=row.live_minute,
-                    status_short=row.status_short,
-                    status=row.status,
-                    source_provider=row.source_provider,
-                    source_url=row.source_url,
-                    external_id=row.external_id,
-                )
+        return [_summary_from_row(row) for row in rows]
+
+
+def _summary_from_row(row: Match) -> MatchSummary:
+    kickoff = row.kickoff_at
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=timezone.utc)
+    return MatchSummary(
+        id=row.public_id,
+        competition=row.competition.name,
+        country=row.competition.country.name,
+        country_code=row.competition.country.code,
+        competition_logo=row.competition.logo_url,
+        kickoff_at=kickoff,
+        home_team=row.home_team.name,
+        away_team=row.away_team.name,
+        home_team_id=str(row.home_team.id),
+        away_team_id=str(row.away_team.id),
+        league_id=row.competition.external_id,
+        season=row.season.start_year if row.season else None,
+        round=row.round,
+        venue_id=row.venue_id,
+        venue=row.venue,
+        referee=row.referee,
+        home_form=row.home_form,
+        away_form=row.away_form,
+        home_logo=row.home_team.logo_url,
+        away_logo=row.away_team.logo_url,
+        data_quality=row.data_quality,
+        odds_available=row.odds_available,
+        home_score=row.home_score,
+        away_score=row.away_score,
+        halftime_home_score=row.half_time_home_score,
+        halftime_away_score=row.half_time_away_score,
+        elapsed=row.live_minute,
+        status_short=row.status_short,
+        status=row.status,
+        source_provider=row.source_provider,
+        source_url=row.source_url,
+        external_id=row.external_id,
+    )
+
+
+def load_match(public_id: str) -> MatchSummary | None:
+    """Resolve a stored match before consulting the originating provider."""
+    with SessionLocal() as session:
+        row = session.scalar(
+            select(Match)
+            .where(Match.public_id == public_id)
+            .options(
+                joinedload(Match.competition).joinedload(Competition.country),
+                joinedload(Match.season),
+                joinedload(Match.home_team),
+                joinedload(Match.away_team),
             )
-        return output
+        )
+        return _summary_from_row(row) if row is not None else None
