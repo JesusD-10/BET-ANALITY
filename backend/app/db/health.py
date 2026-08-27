@@ -17,6 +17,9 @@ EXPECTED_TABLES = frozenset(
         "squad_memberships",
         "matches",
         "match_team_statistics",
+        "match_lineups",
+        "match_lineup_players",
+        "match_events",
         "match_odds",
         "import_records",
     }

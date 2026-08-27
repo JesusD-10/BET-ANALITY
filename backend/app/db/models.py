@@ -284,6 +284,71 @@ class MatchTeamStatistics(Base):
     team = relationship("Team")
 
 
+class MatchLineup(Base):
+    __tablename__ = "match_lineups"
+    __table_args__ = (
+        UniqueConstraint("match_id", "team_id", name="uq_match_lineup_team"),
+        Index("ix_match_lineups_match", "match_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    match_id = Column(ForeignKey("matches.id", ondelete="CASCADE"), nullable=False, index=True)
+    team_id = Column(ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False, index=True)
+    formation = Column(String(24), nullable=True)
+    coach_name = Column(String(180), nullable=True)
+    confirmed = Column(Boolean, nullable=False, default=False)
+    source_provider = Column(String(64), nullable=False)
+    provider_payload = Column(JSON, nullable=True)
+    captured_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    players = relationship("MatchLineupPlayer", back_populates="lineup", cascade="all, delete-orphan")
+
+
+class MatchLineupPlayer(Base):
+    __tablename__ = "match_lineup_players"
+    __table_args__ = (
+        UniqueConstraint("lineup_id", "player_id", "role", name="uq_match_lineup_player_role"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    lineup_id = Column(ForeignKey("match_lineups.id", ondelete="CASCADE"), nullable=False, index=True)
+    player_id = Column(ForeignKey("players.id", ondelete="SET NULL"), nullable=True, index=True)
+    player_name = Column(String(180), nullable=False)
+    role = Column(String(24), nullable=False)
+    shirt_number = Column(Integer, nullable=True)
+    position = Column(String(24), nullable=True)
+    grid = Column(String(24), nullable=True)
+    rating = Column(Float, nullable=True)
+    provider_payload = Column(JSON, nullable=True)
+
+    lineup = relationship("MatchLineup", back_populates="players")
+    player = relationship("Player")
+
+
+class MatchEvent(Base):
+    __tablename__ = "match_events"
+    __table_args__ = (
+        UniqueConstraint("match_id", "event_key", name="uq_match_event_key"),
+        Index("ix_match_events_match_minute", "match_id", "minute"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    match_id = Column(ForeignKey("matches.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_key = Column(String(128), nullable=False)
+    minute = Column(Integer, nullable=True)
+    extra_minute = Column(Integer, nullable=True)
+    event_type = Column(String(32), nullable=False)
+    detail = Column(String(120), nullable=True)
+    comments = Column(Text, nullable=True)
+    team_id = Column(ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True)
+    player_id = Column(ForeignKey("players.id", ondelete="SET NULL"), nullable=True, index=True)
+    player_name = Column(String(180), nullable=True)
+    assist_name = Column(String(180), nullable=True)
+    source_provider = Column(String(64), nullable=False)
+    provider_payload = Column(JSON, nullable=True)
+    captured_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
 class MatchOdds(Base):
     __tablename__ = "match_odds"
     __table_args__ = (
