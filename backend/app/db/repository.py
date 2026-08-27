@@ -36,9 +36,13 @@ def build_match_fingerprint(
 def _get_or_create_country(session: Session, spec: CountrySpec) -> Country:
     country = session.scalar(select(Country).where(Country.code == spec.code))
     if country is None:
+        country = session.scalar(select(Country).where(Country.slug == slugify(spec.name)))
+    if country is None:
         country = Country(code=spec.code, name=spec.name, slug=slugify(spec.name))
         session.add(country)
         session.flush()
+    elif country.code != spec.code and country.code in {"UNKNOWN", "UNK"}:
+        country.code = spec.code
     elif country.name == "Unknown" and spec.name != "Unknown":
         country.name = spec.name
         country.slug = slugify(spec.name)
