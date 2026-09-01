@@ -2,7 +2,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Search, Swords } from "lucide-react";
+import { Pencil, Search, Swords } from "lucide-react";
 
 import AppShell, { PageHeader, ResponsibleNote } from "../components/AppShell";
 import {
@@ -21,17 +21,19 @@ function TeamPicker({
   selected,
   onSelect,
   onQueryChange,
+  onClear,
 }: {
   label: string;
   value: string;
   selected: TeamSummary | null;
   onSelect: (team: TeamSummary) => void;
   onQueryChange: (value: string) => void;
+  onClear: () => void;
 }) {
   const [results, setResults] = useState<TeamSummary[]>([]);
 
   useEffect(() => {
-    if (value.trim().length < 2) {
+    if (selected || value.trim().length < 2) {
       setResults([]);
       return;
     }
@@ -47,19 +49,27 @@ function TeamPicker({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [value]);
+  }, [selected, value]);
 
   return (
     <div className="h2h-picker">
-      <label>
-        <span>{label}</span>
-        <div className="search-wrap">
-          <Search size={17} aria-hidden="true" />
-          <input value={value} onChange={(event) => onQueryChange(event.target.value)} placeholder="Escribe un equipo..." />
+      <span className="h2h-picker-label">{label}</span>
+      {selected ? (
+        <div className="h2h-selected">
+          {selected.logo_url && <img src={selected.logo_url} alt="" />}
+          <span><strong>{selected.name}</strong><small>{selected.country.name}</small></span>
+          <button type="button" aria-label={`Cambiar ${label.toLowerCase()}`} onClick={onClear}>
+            <Pencil size={15} aria-hidden="true" />
+          </button>
         </div>
-      </label>
-      {selected?.id && <div className="h2h-selected">{selected.logo_url && <img src={selected.logo_url} alt="" />}<strong>{selected.name}</strong></div>}
-      {results.length > 0 && value.trim().length >= 2 && (
+      ) : (
+        <label className="search-wrap">
+          <Search size={17} aria-hidden="true" />
+          <span className="sr-only">{label}</span>
+          <input value={value} onChange={(event) => onQueryChange(event.target.value)} placeholder="Escribe un equipo..." />
+        </label>
+      )}
+      {!selected && results.length > 0 && value.trim().length >= 2 && (
         <div className="h2h-options">
           {results.map((team) => (
             <button type="button" key={team.id} onClick={() => onSelect(team)}>
@@ -120,9 +130,9 @@ export default function HeadToHeadPage() {
     <AppShell contentId="h2h">
       <PageHeader eyebrow="ARCHIVO HISTÓRICO" title="Cara a cara" />
       <section className="h2h-panel" aria-label="Seleccionar equipos para enfrentamientos directos">
-        <TeamPicker label="Equipo local" value={homeQuery} selected={home} onQueryChange={(value) => { setHome(null); setHomeQuery(value); }} onSelect={(team) => { setHome(team); setHomeQuery(team.name); }} />
+        <TeamPicker label="Equipo local" value={homeQuery} selected={home} onQueryChange={(value) => { setHome(null); setHomeQuery(value); }} onClear={() => { setHome(null); setHomeQuery(""); }} onSelect={(team) => { setHome(team); setHomeQuery(team.name); }} />
         <Swords className="h2h-versus" size={24} aria-hidden="true" />
-        <TeamPicker label="Equipo visitante" value={awayQuery} selected={away} onQueryChange={(value) => { setAway(null); setAwayQuery(value); }} onSelect={(team) => { setAway(team); setAwayQuery(team.name); }} />
+        <TeamPicker label="Equipo visitante" value={awayQuery} selected={away} onQueryChange={(value) => { setAway(null); setAwayQuery(value); }} onClear={() => { setAway(null); setAwayQuery(""); }} onSelect={(team) => { setAway(team); setAwayQuery(team.name); }} />
       </section>
       {home?.id === away?.id && <div className="empty-state">Selecciona dos equipos distintos.</div>}
       {loading && <div className="empty-state">Buscando enfrentamientos en el historial...</div>}
