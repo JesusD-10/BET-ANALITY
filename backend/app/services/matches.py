@@ -11,6 +11,7 @@ import httpx
 
 from app.core.config import settings
 from app.db import load_match as load_stored_match
+from app.db import load_match_statistics as load_stored_match_statistics
 from app.db import load_matches as load_stored_matches
 from app.db import persist_matches as persist_stored_matches
 from app.schemas.matches import (
@@ -1437,6 +1438,12 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
     if match is None:
         return None
 
+    try:
+        stored_fixture_statistics = load_stored_match_statistics(match_id)
+    except Exception:
+        logger.exception("No se pudieron consultar las estadísticas guardadas de %s.", match_id)
+        stored_fixture_statistics = None
+
     referee_info: RefereeInfo | None = None
     injuries: list[InjuryItem] = []
     lineups = None
@@ -1839,6 +1846,22 @@ def get_analysis(match_id: str, use_external_ai: bool = True) -> MatchAnalysisRe
             ),
             prediction_requested=bool(full_enrichment and predictions_supported),
             provider_unavailable_reason=provider_unavailable_reason,
+        )
+    elif stored_fixture_statistics is not None:
+        home_history = [stored_fixture_statistics]
+        away_history = [stored_fixture_statistics]
+        evidence = build_match_evidence(
+            match=match,
+            provider_name="historical database",
+            home_history=home_history,
+            away_history=away_history,
+            h2h=h2h_matches,
+            injuries=injuries,
+            lineups=lineups,
+            odds_quotes=odds_quotes,
+            standings_requested=False,
+            prediction_requested=False,
+            provider_unavailable_reason=None,
         )
 
     analysis = analyze_match_with_ai(

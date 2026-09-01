@@ -138,6 +138,7 @@ export default function TeamDetailPage({ params }: { params: Promise<{ id: strin
   const [detailRetry, setDetailRetry] = useState(0);
   const [scope, setScope] = useState<TeamMatchScope>("past");
   const [competitionId, setCompetitionId] = useState("");
+  const [seasonId, setSeasonId] = useState("");
   const [page, setPage] = useState(1);
   const [matches, setMatches] = useState<TeamMatchesResponse | null>(null);
   const [matchesLoading, setMatchesLoading] = useState(validTeamId);
@@ -187,6 +188,7 @@ export default function TeamDetailPage({ params }: { params: Promise<{ id: strin
         page,
         pageSize: HISTORY_PAGE_SIZE,
         competitionId: competitionId ? Number(competitionId) : undefined,
+        seasonId: seasonId ? Number(seasonId) : undefined,
       },
       controller.signal,
     )
@@ -203,7 +205,7 @@ export default function TeamDetailPage({ params }: { params: Promise<{ id: strin
       });
 
     return () => controller.abort();
-  }, [teamId, validTeamId, scope, competitionId, page, matchesRetry]);
+  }, [teamId, validTeamId, scope, competitionId, seasonId, page, matchesRetry]);
 
   const visibleCompetitions = useMemo(
     () => [...(detail?.competitions ?? [])].sort((left, right) => right.matches - left.matches),
@@ -217,6 +219,11 @@ export default function TeamDetailPage({ params }: { params: Promise<{ id: strin
 
   function selectCompetition(value: string) {
     setCompetitionId(value);
+    setPage(1);
+  }
+
+  function selectSeason(value: string) {
+    setSeasonId(value);
     setPage(1);
   }
 
@@ -367,6 +374,15 @@ export default function TeamDetailPage({ params }: { params: Promise<{ id: strin
               <option value="">Todas las competiciones</option>
               {visibleCompetitions.map((competition) => (
                 <option value={competition.id} key={competition.id}>{competition.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span className="sr-only">Filtrar por temporada</span>
+            <select value={seasonId} onChange={(event) => selectSeason(event.target.value)}>
+              <option value="">Todas las temporadas</option>
+              {detail.seasons.map((season) => (
+                <option value={season.id} key={season.id}>{season.label} ({season.matches})</option>
               ))}
             </select>
           </label>

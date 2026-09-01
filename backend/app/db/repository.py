@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import hashlib
+import re
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
@@ -12,9 +13,33 @@ from app.db.catalog import (
     resolve_country,
     slugify,
 )
-from app.db.models import Competition, Country, Match, Season, Team
+from app.db.models import Competition, Country, Match, MatchTeamStatistics, Season, Team
 from app.db.session import SessionLocal
 from app.schemas.matches import MatchSummary
+
+
+def _team_alias_variants(name: str) -> list[str]:
+    raw = " ".join(str(name or "").split())
+    if not raw:
+        return []
+    variants = {raw}
+    trimmed = re.sub(
+        r"^(fc|cf|club|c\.f\.|ac|sc|rc|us|ud|cd|sv|sl|deportivo|athletic|atletico|real)\s+",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if trimmed != raw:
+        variants.add(trimmed)
+    return sorted({value.strip() for value in variants if value and value.strip()}, key=len)
+
+
+def _canonical_team_key(name: str) -> str:
+    for candidate in _team_alias_variants(name):
+        key = slugify(candidate)
+        if key and key != "unknown":
+            return key
+    return slugify(name)
 
 
 def _stable_hash(*parts: object) -> str:
@@ -139,12 +164,23 @@ def _get_or_create_team(
             )
         )
     if team is None:
-        team = session.scalar(
-            select(Team).where(
-                Team.country_id == country.id,
-                Team.slug == slugify(name),
+        candidate_names = _team_alias_variants(name)
+        for candidate_name in candidate_names:
+            team = session.scalar(
+                select(Team).where(
+                    Team.country_id == country.id,
+                    Team.slug == slugify(candidate_name),
+                )
             )
-        )
+            if team is not None:
+                break
+        if team is None:
+            team = session.scalar(
+                select(Team).where(
+                    Team.country_id == country.id,
+                    Team.slug == slugify(name),
+                )
+            )
     if team is None:
         team = Team(
             country=country,
@@ -160,8 +196,13 @@ def _get_or_create_team(
         if provider and external_id and not team.external_id:
             team.source_provider = provider
             team.external_id = str(external_id)
-        if logo_url:
+        if not team.logo_url and logo_url:
             team.logo_url = logo_url
+        normalized_name = " ".join(str(name).split())
+        if normalized_name and normalized_name.lower() not in team.name.lower():
+            preferred_name = max([team.name, normalized_name], key=len)
+            team.name = preferred_name
+            team.slug = slugify(preferred_name)
     return team
 
 
@@ -399,3 +440,47 @@ def load_match(public_id: str) -> MatchSummary | None:
             )
         )
         return _summary_from_row(row) if row is not None else None
+
+
+def load_match_statistics(public_id: str) -> dict[str, object] | None:
+    """Return persisted fixture statistics in the provider-neutral evidence shape."""
+    with SessionLocal() as session:
+        row = session.scalar(
+            select(Match)
+            .where(Match.public_id == public_id)
+            .options(
+                joinedload(Match.competition),
+                joinedload(Match.home_team),
+                joinedload(Match.away_team),
+                joinedload(Match.team_statistics).joinedload(MatchTeamStatistics.team),
+            )
+        )
+        if row is None or not row.team_statistics:
+            return None
+
+        metrics = (
+            "expected_goals",
+            "shots",
+            "shots_on_target",
+            "fouls",
+            "corners",
+            "yellow_cards",
+            "red_cards",
+        )
+        statistics = [
+            {
+                "team": {"id": str(item.team_id), "name": item.team.name},
+                **{metric: getattr(item, metric) for metric in metrics},
+            }
+            for item in row.team_statistics
+        ]
+        return {
+            "fixture": {"id": row.public_id, "date": row.kickoff_at.isoformat()},
+            "teams": {
+                "home": {"id": str(row.home_team_id), "name": row.home_team.name},
+                "away": {"id": str(row.away_team_id), "name": row.away_team.name},
+            },
+            "goals": {"home": row.home_score, "away": row.away_score},
+            "league": {"name": row.competition.name},
+            "statistics": statistics,
+        }

@@ -4,14 +4,18 @@ from datetime import date, datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from app.db import persist_matches
 from app.db.session import SessionLocal
 from app.db.team_repository import (
     get_head_to_head as load_head_to_head,
     get_team_detail as load_team_detail,
     get_team_matches as load_team_matches,
+    provider_team_id,
     search_teams as search_team_rows,
     team_exists,
 )
+from app.core.config import settings
+from app.services.api_football import APIFootballAPIError, APIFootballProvider
 from app.schemas.teams import TeamDetailResponse, TeamMatchesResponse, TeamSearchResponse
 
 
@@ -64,6 +68,7 @@ def get_team_matches(
     page: int,
     page_size: int,
     competition_id: int | None,
+    season_id: int | None = None,
 ) -> TeamMatchesResponse:
     with SessionLocal() as session:
         if not team_exists(session, team_id):
@@ -76,6 +81,7 @@ def get_team_matches(
             page=page,
             page_size=page_size,
             competition_id=competition_id,
+            season_id=season_id,
         )
 
 
@@ -93,6 +99,22 @@ def get_head_to_head(
             raise TeamNotFoundError(team_id)
         if not team_exists(session, opponent_id):
             raise TeamNotFoundError(opponent_id)
+        first_provider_id = provider_team_id(session, team_id, APIFootballProvider.provider_name)
+        second_provider_id = provider_team_id(session, opponent_id, APIFootballProvider.provider_name)
+
+    if first_provider_id and second_provider_id and settings.api_football_key.strip():
+        try:
+            provider = APIFootballProvider(
+                key=settings.api_football_key,
+                base_url=settings.api_football_base_url,
+                is_rapidapi=settings.api_football_is_rapidapi,
+                timeout=settings.api_football_timeout_seconds,
+            )
+            persist_matches(provider.get_upcoming_head_to_head(first_provider_id, second_provider_id))
+        except (APIFootballAPIError, ValueError):
+            pass
+
+    with SessionLocal() as session:
         return load_head_to_head(
             session,
             team_id=team_id,

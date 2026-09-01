@@ -28,4 +28,17 @@ def load_match(public_id: str) -> MatchSummary | None:
 
     return load(public_id)
 
-__all__ = ["init_database", "load_match", "load_matches", "persist_matches"]
+
+def load_match_statistics(public_id: str) -> dict[str, object] | None:
+    from app.db.repository import load_match_statistics as load
+
+    return load(public_id)
+
+
+__all__ = [
+    "init_database",
+    "load_match",
+    "load_match_statistics",
+    "load_matches",
+    "persist_matches",
+]

@@ -130,6 +130,43 @@ def test_catalog_sync_is_idempotent_and_persists_logos_players_and_memberships()
         assert membership.position == "Attacker"
 
 
+def test_catalog_sync_enriches_historical_team_alias_with_official_logo() -> None:
+    factory = _session_factory()
+    provider = FakeProvider()
+    provider.teams[0]["team"]["name"] = "FC Barcelona"
+    provider.teams[0]["team"]["country"] = "Spain"
+    provider.teams[0]["team"]["logo"] = "https://img.test/barcelona.png"
+
+    with factory() as session:
+        country = Country(code="ESP", name="Spain", slug="spain")
+        session.add_all(
+            [
+                country,
+                Team(country=country, name="Barcelona", slug="barcelona", kind="club"),
+            ]
+        )
+        session.commit()
+
+    sync_catalog(
+        SyncOptions(
+            league_id="140",
+            season=2026,
+            competition_name="La Liga",
+            country="Spain",
+            country_code="ESP",
+        ),
+        provider=provider,  # type: ignore[arg-type]
+        session_factory=factory,
+        initialize_schema=False,
+    )
+
+    with factory() as session:
+        teams = session.scalars(select(Team)).all()
+        assert len(teams) == 1
+        assert teams[0].external_id == "40"
+        assert teams[0].logo_url == "https://img.test/barcelona.png"
+
+
 def test_catalog_sync_dry_run_rolls_back_and_quota_reserve_skips_squads() -> None:
     factory = _session_factory()
     provider = FakeProvider(remaining=15)

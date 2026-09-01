@@ -211,6 +211,7 @@ def team_matches(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     competition_id: int | None = Query(default=None, ge=1),
+    season_id: int | None = Query(default=None, ge=1),
 ) -> TeamMatchesResponse:
     try:
         return get_team_matches(
@@ -219,6 +220,7 @@ def team_matches(
             page=page,
             page_size=page_size,
             competition_id=competition_id,
+            season_id=season_id,
         )
     except TeamNotFoundError as exc:
         raise HTTPException(status_code=404, detail="El equipo solicitado no existe") from exc

@@ -1,11 +1,12 @@
 from datetime import date, datetime, timezone
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import Competition, Country, Match, Season, Team
+from app.db import repository
+from app.db.models import Competition, Country, Match, MatchTeamStatistics, Season, Team
 from app.db.session import Base
 from app.db import team_repository
 from app.main import app
@@ -182,6 +183,7 @@ def test_repository_search_detail_and_paginated_history() -> None:
         "next_match_date": date(2026, 9, 1),
     }
     assert [(item.name, item.matches) for item in detail.competitions] == [("La Liga", 4)]
+    assert [(item.label, item.matches) for item in detail.seasons] == [("2025-2026", 4)]
     assert first_page.total == 3
     assert first_page.total_pages == 2
     assert [item.id for item in first_page.items] == ["match-3", "match-2"]
@@ -212,6 +214,140 @@ def test_repository_h2h_is_completed_and_paginated() -> None:
     assert result.total == 3
     assert result.total_pages == 2
     assert [item.id for item in result.items] == ["match-1"]
+
+
+def test_repository_merges_team_aliases_and_fills_missing_logo() -> None:
+    session_factory = _memory_session_factory()
+
+    with session_factory() as session:
+        spain = Country(code="ES", name="Spain", slug="spain")
+        league = Competition(country=spain, name="La Liga", slug="la-liga", kind="league")
+        session.add(spain)
+        session.add(league)
+
+        legacy = Team(
+            country=spain,
+            name="Barcelona",
+            slug="barcelona",
+            kind="club",
+            logo_url=None,
+        )
+        current = Team(
+            country=spain,
+            name="FC Barcelona",
+            slug="fc-barcelona",
+            kind="club",
+            logo_url="https://example.com/barca.png",
+        )
+        reserve = Team(
+            country=spain,
+            name="Barcelona B",
+            slug="barcelona-b",
+            kind="club",
+            logo_url=None,
+        )
+        session.add_all([legacy, current, reserve])
+        session.flush()
+        session.add_all(
+            [
+                Match(
+                    public_id="legacy-barca-match",
+                    fingerprint="legacy-barca-fingerprint",
+                    competition=league,
+                    home_team=legacy,
+                    away_team=reserve,
+                    match_date=date(2019, 5, 1),
+                    kickoff_at=datetime(2019, 5, 1, 20, tzinfo=timezone.utc),
+                    kickoff_precision="datetime",
+                    status="FINALIZADO",
+                    home_score=2,
+                    away_score=0,
+                    source_provider="historical",
+                ),
+                Match(
+                    public_id="current-barca-match",
+                    fingerprint="current-barca-fingerprint",
+                    competition=league,
+                    home_team=current,
+                    away_team=reserve,
+                    match_date=date(2026, 8, 31),
+                    kickoff_at=datetime(2026, 8, 31, 20, tzinfo=timezone.utc),
+                    kickoff_precision="datetime",
+                    status="FINALIZADO",
+                    home_score=3,
+                    away_score=1,
+                    source_provider="api-football",
+                ),
+            ]
+        )
+        session.commit()
+
+        search = team_repository.search_teams(
+            session,
+            query="barcelona",
+            country_code="ES",
+            kind="club",
+            page=1,
+            page_size=20,
+        )
+
+        assert search.total == 1
+        assert search.items[0].name == "FC Barcelona"
+        assert search.items[0].logo_url is not None
+        assert search.items[0].logo_url.startswith("http")
+        detail = team_repository.get_team_detail(
+            session, team_id=current.id, today=date(2026, 9, 1)
+        )
+        history = team_repository.get_team_matches(
+            session,
+            team_id=current.id,
+            scope="past",
+            today=date(2026, 9, 1),
+            page=1,
+            page_size=10,
+            competition_id=None,
+        )
+
+        assert detail is not None
+        assert detail.statistics.completed_matches == 2
+        assert history.total == 2
+
+
+def test_repository_loads_persisted_match_statistics(monkeypatch) -> None:
+    session_factory = _memory_session_factory()
+    real_id, _ = _seed_history(session_factory)
+    monkeypatch.setattr(repository, "SessionLocal", session_factory)
+
+    with session_factory() as session:
+        match = session.scalar(select(Match).where(Match.public_id == "match-1"))
+        assert match is not None
+        session.add_all(
+            [
+                MatchTeamStatistics(
+                    match=match,
+                    team_id=match.home_team_id,
+                    side="home",
+                    shots=12,
+                    shots_on_target=5,
+                    corners=7,
+                ),
+                MatchTeamStatistics(
+                    match=match,
+                    team_id=match.away_team_id,
+                    side="away",
+                    shots=4,
+                    shots_on_target=1,
+                    corners=2,
+                ),
+            ]
+        )
+        session.commit()
+
+        result = repository.load_match_statistics("match-1")
+
+    assert result is not None
+    assert result["goals"] == {"home": 2, "away": 1}
+    assert result["statistics"][0]["shots"] == 12
 
 
 def test_team_api_contract_and_errors(monkeypatch) -> None:

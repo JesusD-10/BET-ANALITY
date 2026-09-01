@@ -1819,6 +1819,27 @@ class APIFootballProvider:
         )
         return self.normalize_history(completed, bounded_limit)
 
+    def get_upcoming_head_to_head(
+        self, team1_id: str, team2_id: str, limit: int = 5
+    ) -> list[MatchSummary]:
+        first_id = self._clean_id(team1_id, "team1_id")
+        second_id = self._clean_id(team2_id, "team2_id")
+        if first_id == second_id:
+            return []
+        data = self._cached_request(
+            "fixtures",
+            params={
+                "h2h": f"{first_id}-{second_id}",
+                "next": str(max(1, min(limit, 5))),
+                "timezone": SPORTS_TIMEZONE.key,
+            },
+            ttl=5 * 60,
+        )
+        rows = data.get("response")
+        if not isinstance(rows, list):
+            raise APIFootballAPIError("API-Football devolvió próximos cruces inválidos.")
+        return [self._to_match_summary(row) for row in rows]
+
     @staticmethod
     def _history_item(item: dict) -> H2HMatchItem | None:
         """Normalize one real fixture, skipping incomplete records instead of fabricating values."""

@@ -523,6 +523,7 @@ export type TeamDetailResponse = {
   team: TeamSummary;
   statistics: TeamStatistics;
   competitions: TeamCompetition[];
+  seasons: Array<{ id: number; label: string; start_year: number; end_year: number; matches: number }>;
 };
 
 export type HistoricalMatchTeam = {
@@ -581,6 +582,7 @@ export type TeamMatchesResponse = {
   page_size: number;
   total: number;
   total_pages: number;
+  upcoming: TeamMatch[];
 };
 
 export type TeamSearchOptions = {
@@ -624,6 +626,7 @@ export type TeamMatchesOptions = {
   page?: number;
   pageSize?: number;
   competitionId?: number;
+  seasonId?: number;
 };
 
 export async function getTeamMatches(
@@ -638,6 +641,9 @@ export async function getTeamMatches(
   });
   if (options.competitionId !== undefined) {
     params.set("competition_id", String(options.competitionId));
+  }
+  if (options.seasonId !== undefined) {
+    params.set("season_id", String(options.seasonId));
   }
 
   const response = await apiFetch(

@@ -60,10 +60,19 @@ class TeamCompetitionSummary(BaseModel):
     matches: int = Field(ge=1)
 
 
+class TeamSeasonSummary(BaseModel):
+    id: int
+    label: str
+    start_year: int
+    end_year: int
+    matches: int = Field(ge=1)
+
+
 class TeamDetailResponse(BaseModel):
     team: TeamListItem
     statistics: TeamStatistics
     competitions: list[TeamCompetitionSummary]
+    seasons: list[TeamSeasonSummary]
 
 
 class TeamMatchSideItem(BaseModel):
@@ -120,3 +129,4 @@ class TeamMatchesResponse(BaseModel):
     page_size: int = Field(ge=1, le=100)
     total: int = Field(ge=0)
     total_pages: int = Field(ge=0)
+    upcoming: list[TeamMatchItem] = Field(default_factory=list)

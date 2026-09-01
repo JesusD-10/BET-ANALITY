@@ -106,6 +106,23 @@ def _country_spec(name: str, code: str | None = None) -> CountrySpec:
     return CountrySpec(resolved.code, clean_name if resolved.name == "Unknown" else resolved.name)
 
 
+def _canonical_team_key(name: str) -> str:
+    raw = " ".join(str(name or "").split())
+    without_prefix = re.sub(
+        r"^(fc|cf|club|c\.f\.|ac|sc|rc|us|ud|cd|sv|sl|deportivo|athletic|atletico|real)\s+",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    without_reserve = re.sub(
+        r"\s+(b|ii|iii|iv|reserve|reserves|academy)$",
+        "",
+        without_prefix or raw,
+        flags=re.IGNORECASE,
+    )
+    return slugify(without_reserve)
+
+
 def _upsert_country(session: Session, spec: CountrySpec) -> tuple[Country, bool]:
     country = session.scalar(select(Country).where(Country.code == spec.code))
     if country is None:
@@ -210,6 +227,18 @@ def _upsert_team(
                 Team.country_id == country.id,
                 Team.slug == slugify(name),
             )
+        )
+    if team is None:
+        canonical = _canonical_team_key(name)
+        team = next(
+            (
+                candidate
+                for candidate in session.scalars(
+                    select(Team).where(Team.country_id == country.id)
+                )
+                if _canonical_team_key(candidate.name) == canonical
+            ),
+            None,
         )
     created = team is None
     if team is None:
