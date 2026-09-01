@@ -30,6 +30,7 @@ from app.services.teams import (
     get_head_to_head,
     get_team_detail,
     get_team_matches,
+    refresh_head_to_head_upcoming,
     search_teams,
 )
 
@@ -248,6 +249,19 @@ def team_head_to_head(
         raise HTTPException(status_code=404, detail="El equipo solicitado no existe") from exc
     except InvalidTeamPairError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/teams/{team_id}/h2h/{opponent_id}/refresh", status_code=204, tags=["teams"])
+def refresh_team_head_to_head(
+    team_id: int = Path(ge=1),
+    opponent_id: int = Path(ge=1),
+) -> None:
+    if team_id == opponent_id:
+        raise HTTPException(status_code=400, detail="Los equipos del historial H2H deben ser distintos")
+    try:
+        refresh_head_to_head_upcoming(team_id, opponent_id)
+    except TeamNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="El equipo solicitado no existe") from exc
 
 
 @router.get(

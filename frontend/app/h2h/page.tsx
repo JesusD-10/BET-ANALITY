@@ -10,6 +10,7 @@ import {
   getTeamHeadToHead,
   getTeams,
   isAbortError,
+  refreshTeamHeadToHead,
   type TeamMatch,
   type TeamSummary,
 } from "../lib/api";
@@ -98,6 +99,12 @@ export default function HeadToHeadPage() {
           setMatches(response.items);
           setUpcoming(response.upcoming);
           setTotal(response.total);
+          refreshTeamHeadToHead(home.id, away.id, controller.signal)
+            .then(() => getTeamHeadToHead(home.id, away.id, 1, 100, controller.signal))
+            .then((updated) => {
+              if (!controller.signal.aborted) setUpcoming(updated.upcoming);
+            })
+            .catch(() => undefined);
         }
       })
       .catch((requestError: unknown) => {

@@ -670,3 +670,15 @@ export async function getTeamHeadToHead(
   return response.json() as Promise<TeamMatchesResponse>;
 }
 
+export async function refreshTeamHeadToHead(
+  teamId: number,
+  opponentId: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await apiFetch(
+    `${apiUrl}/teams/${encodeURIComponent(String(teamId))}/h2h/${encodeURIComponent(String(opponentId))}/refresh`,
+    { method: "POST", cache: "no-store", signal },
+  );
+  if (!response.ok) await throwApiError(response, "No se pudo actualizar el próximo cruce");
+}
+

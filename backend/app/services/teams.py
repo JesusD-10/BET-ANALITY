@@ -99,9 +99,26 @@ def get_head_to_head(
             raise TeamNotFoundError(team_id)
         if not team_exists(session, opponent_id):
             raise TeamNotFoundError(opponent_id)
-        first_provider_id = provider_team_id(session, team_id, APIFootballProvider.provider_name)
-        second_provider_id = provider_team_id(session, opponent_id, APIFootballProvider.provider_name)
 
+        return load_head_to_head(
+            session,
+            team_id=team_id,
+            opponent_id=opponent_id,
+            today=_today_in_lima(),
+            page=page,
+            page_size=page_size,
+        )
+
+
+def refresh_head_to_head_upcoming(team_id: int, opponent_id: int) -> None:
+    """Fetch a future meeting only after the historical database result is shown."""
+    with SessionLocal() as session:
+        first_provider_id = provider_team_id(
+            session, team_id, APIFootballProvider.provider_name
+        )
+        second_provider_id = provider_team_id(
+            session, opponent_id, APIFootballProvider.provider_name
+        )
     if first_provider_id and second_provider_id and settings.api_football_key.strip():
         try:
             provider = APIFootballProvider(
@@ -113,13 +130,3 @@ def get_head_to_head(
             persist_matches(provider.get_upcoming_head_to_head(first_provider_id, second_provider_id))
         except (APIFootballAPIError, ValueError):
             pass
-
-    with SessionLocal() as session:
-        return load_head_to_head(
-            session,
-            team_id=team_id,
-            opponent_id=opponent_id,
-            today=_today_in_lima(),
-            page=page,
-            page_size=page_size,
-        )
