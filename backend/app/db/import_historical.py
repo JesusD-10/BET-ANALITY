@@ -15,7 +15,14 @@ import zipfile
 from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
-from app.db.catalog import DIVISIONS, CountrySpec, resolve_country, slugify
+from app.db.catalog import (
+    DIVISIONS,
+    CountrySpec,
+    canonical_competition_name,
+    resolve_country,
+    season_from_match_date,
+    slugify,
+)
 from app.db.football_txt import FootballMatch, parse_football_txt
 from app.db.init_db import init_database
 from app.db.models import (
@@ -816,10 +823,14 @@ def _normalize_row(source: _SourceRow) -> HistoricalMatch:
         competition = _clean_text(values.get("League")) or division
     if not competition:
         raise ValueError("missing competition")
+    competition = canonical_competition_name(country.code, competition)
 
     season_label, season_start, season_end = _season_from_value(
         values.get("Season"), source.source_file, match_date
     )
+    derived_season = season_from_match_date(country.code, match_date)
+    if derived_season is not None:
+        season_label, season_start, season_end = derived_season
     kickoff_time = _parse_time(values.get("Time"), source.datemode)
     offset_text = _clean_text(values.get("_KickoffUtcOffset"))
     precision = "datetime-local-unknown" if kickoff_time else "date-only"

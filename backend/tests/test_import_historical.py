@@ -190,6 +190,30 @@ def test_row_hash_includes_persisted_metadata(field, value) -> None:
     assert changed.row_hash != base.row_hash
 
 
+def test_import_normalizes_la_liga_and_derives_european_season() -> None:
+    row = importer._normalize_row(
+        importer._SourceRow(
+            values={
+                "Country": "Spain",
+                "League": "Primera Division",
+                "Season": "2005-2026",
+                "Date": "16/05/2021",
+                "HomeTeam": "Barcelona",
+                "AwayTeam": "Celta",
+                "FTHG": 1,
+                "FTAG": 2,
+            },
+            source_file="Spain_2005-2026.csv",
+            file_hash="test",
+            sheet_name="Spain",
+            row_number=2,
+        )
+    )
+
+    assert row.competition == "La Liga"
+    assert (row.season_label, row.season_start, row.season_end) == ("2020-2021", 2020, 2021)
+
+
 def test_merge_never_downgrades_result_or_kickoff_and_deduplicates_pending_odds(
     tmp_path, monkeypatch
 ) -> None:

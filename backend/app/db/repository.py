@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.db.catalog import (
     CountrySpec,
+    canonical_competition_name,
     infer_competition_country,
     resolve_country,
     slugify,
@@ -84,6 +85,7 @@ def _get_or_create_competition(
     kind: str = "league",
     logo_url: str | None = None,
 ) -> Competition:
+    name = canonical_competition_name(country.code, name)
     competition = None
     if provider and external_id:
         competition = session.scalar(

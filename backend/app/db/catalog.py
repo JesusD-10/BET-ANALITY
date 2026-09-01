@@ -120,6 +120,17 @@ COMPETITION_COUNTRIES: dict[str, CountrySpec] = {
 }
 
 
+COMPETITION_ALIASES: dict[tuple[str, str], str] = {
+    ("ESP", "primera-division"): "La Liga",
+    ("ESP", "primera-division-de-espana"): "La Liga",
+    ("ESP", "la-liga-ea-sports"): "La Liga",
+}
+
+EUROPEAN_LEAGUE_COUNTRIES = frozenset(
+    {"AUT", "BEL", "CHE", "DEU", "DNK", "ENG", "ESP", "FRA", "GRC", "ITA", "NLD", "POL", "PRT", "SCO", "TUR"}
+)
+
+
 def slugify(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
     ascii_text = text.encode("ascii", "ignore").decode("ascii").casefold()
@@ -142,3 +153,16 @@ def resolve_country(value: object) -> CountrySpec:
 
 def infer_competition_country(competition: object) -> CountrySpec:
     return COMPETITION_COUNTRIES.get(slugify(competition), UNKNOWN_COUNTRY)
+
+
+def canonical_competition_name(country_code: str, name: object) -> str:
+    clean = " ".join(str(name or "").split())
+    return COMPETITION_ALIASES.get((country_code.upper(), slugify(clean)), clean)
+
+
+def season_from_match_date(country_code: str, match_date: object) -> tuple[str, int, int] | None:
+    if country_code.upper() not in EUROPEAN_LEAGUE_COUNTRIES or not hasattr(match_date, "year"):
+        return None
+    year = int(match_date.year)
+    start_year = year if match_date.month >= 8 else year - 1
+    return f"{start_year}-{start_year + 1}", start_year, start_year + 1
