@@ -26,7 +26,7 @@ def test_maintain_catalog_merges_la_liga_rebuilds_season_and_copies_logo() -> No
         session.add(Match(public_id="barca-celta", fingerprint="barca-celta", competition=primera, season=old_season, home_team=historical, away_team=rival, match_date=date(2021, 5, 16), kickoff_at=datetime(2021, 5, 16, tzinfo=timezone.utc), status="FINALIZADO", source_provider="historical"))
         session.commit()
 
-    report = maintain_catalog(factory)
+    report = maintain_catalog(factory, batch_size=1, progress_every=1)
 
     assert report == {"competitions_merged": 1, "seasons_reassigned": 1, "logos_propagated": 1}
     with factory() as session:

@@ -3,14 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from datetime import date
 from typing import Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.catalog import canonical_competition_name, season_from_match_date, slugify
-from app.db.models import Competition, Match, Season, Team
+from app.db.models import Competition, Country, Match, Season, Team
 from app.db.session import SessionLocal
 from app.db.team_repository import _canonical_team_key_for_row
 from app.services.api_football import APIFootballAPIError, APIFootballProvider
@@ -18,8 +19,11 @@ from app.services.api_football import APIFootballAPIError, APIFootballProvider
 
 def maintain_catalog(
     session_factory: Callable[[], Session] = SessionLocal,
+    *,
+    batch_size: int = 1_000,
+    progress_every: int = 10_000,
 ) -> dict[str, int]:
-    """Consolidate known catalog aliases without deleting match history."""
+    """Consolidate known catalog aliases with short transactions per batch."""
     report = {"competitions_merged": 0, "seasons_reassigned": 0, "logos_propagated": 0}
     with session_factory() as session:
         competitions = list(session.scalars(select(Competition)))
@@ -37,45 +41,100 @@ def maintain_catalog(
                 source.name = canonical_name
                 source.slug = slugify(canonical_name)
                 report["competitions_merged"] += 1
+                session.commit()
                 continue
-            for match in session.scalars(select(Match).where(Match.competition_id == source.id)):
-                match.competition = target
-            session.flush()
+            for source_season in session.scalars(
+                select(Season).where(Season.competition_id == source.id)
+            ):
+                target_season = session.scalar(
+                    select(Season).where(
+                        Season.competition_id == target.id,
+                        Season.label == source_season.label,
+                    )
+                )
+                if target_season is None:
+                    source_season.competition_id = target.id
+                else:
+                    session.execute(
+                        update(Match)
+                        .where(Match.season_id == source_season.id)
+                        .values(season_id=target_season.id)
+                    )
+                    session.delete(source_season)
+            moved = session.execute(
+                update(Match)
+                .where(Match.competition_id == source.id)
+                .values(competition_id=target.id)
+            )
             session.delete(source)
+            session.commit()
+            if moved.rowcount:
+                report["competitions_merged"] += 1
+                continue
             report["competitions_merged"] += 1
 
-        season_cache: dict[tuple[int, str], Season] = {}
-        matches = session.scalars(
-            select(Match).join(Match.competition).join(Competition.country)
-            .where(Competition.kind == "league")
-        )
-        for match in matches:
-            derived = season_from_match_date(match.competition.country.code, match.match_date)
-            if derived is None:
+        anomalous_seasons = session.execute(
+            select(
+                Season.id,
+                Season.competition_id,
+                Country.code.label("country_code"),
+                func.min(Match.match_date).label("first_match_date"),
+                func.max(Match.match_date).label("last_match_date"),
+            )
+            .join(Competition, Season.competition_id == Competition.id)
+            .join(Country, Competition.country_id == Country.id)
+            .join(Match, Match.season_id == Season.id)
+            .where(Competition.kind == "league", Season.end_year > Season.start_year + 1)
+            .group_by(Season.id, Season.competition_id, Country.code)
+        ).all()
+        processed_matches = 0
+        for source in anomalous_seasons:
+            if source.first_match_date is None or source.last_match_date is None:
                 continue
-            label, start_year, end_year = derived
-            key = (match.competition_id, label)
-            season = season_cache.get(key)
-            if season is None:
-                season = session.scalar(
+            first = season_from_match_date(source.country_code, source.first_match_date)
+            last = season_from_match_date(source.country_code, source.last_match_date)
+            if first is None or last is None:
+                continue
+            for start_year in range(first[1], last[1] + 1):
+                label = f"{start_year}-{start_year + 1}"
+                target = session.scalar(
                     select(Season).where(
-                        Season.competition_id == match.competition_id,
+                        Season.competition_id == source.competition_id,
                         Season.label == label,
                     )
                 )
-                if season is None:
-                    season = Season(
-                        competition_id=match.competition_id,
+                if target is None:
+                    target = Season(
+                        competition_id=source.competition_id,
                         label=label,
                         start_year=start_year,
-                        end_year=end_year,
+                        end_year=start_year + 1,
                     )
-                    session.add(season)
+                    session.add(target)
                     session.flush()
-                season_cache[key] = season
-            if match.season_id != season.id:
-                match.season = season
-                report["seasons_reassigned"] += 1
+                moved = session.execute(
+                    update(Match)
+                    .where(
+                        Match.season_id == source.id,
+                        Match.match_date >= date(start_year, 8, 1),
+                        Match.match_date < date(start_year + 1, 8, 1),
+                    )
+                    .values(season_id=target.id)
+                )
+                moved_count = int(moved.rowcount or 0)
+                report["seasons_reassigned"] += moved_count
+                processed_matches += moved_count
+                session.commit()
+                if processed_matches and processed_matches % max(1, progress_every) < moved_count:
+                    print(
+                        json.dumps(
+                            {
+                                "progress_matches": processed_matches,
+                                "seasons_reassigned": report["seasons_reassigned"],
+                            }
+                        ),
+                        flush=True,
+                    )
 
         teams_by_identity: dict[tuple[int, str], list[Team]] = defaultdict(list)
         for team in session.scalars(select(Team)):
@@ -144,8 +203,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Repara competencias, temporadas y logos del catálogo histórico.")
     parser.add_argument("--fetch-logos", action="store_true")
     parser.add_argument("--logo-limit", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=1_000)
+    parser.add_argument("--progress-every", type=int, default=10_000)
     args = parser.parse_args(argv)
-    report: dict[str, object] = {"catalog": maintain_catalog()}
+    report: dict[str, object] = {
+        "catalog": maintain_catalog(
+            batch_size=max(1, args.batch_size),
+            progress_every=max(1, args.progress_every),
+        )
+    }
     if args.fetch_logos:
         report["logos"] = enrich_missing_logos(limit=max(0, args.logo_limit))
     print(json.dumps(report, ensure_ascii=False))
